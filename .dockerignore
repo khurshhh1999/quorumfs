@@ -1,0 +1,11 @@
+**
+!modules/
+!modules/server/
+!modules/server/build/
+!modules/server/build/install/
+!modules/server/build/install/server/**
+!modules/client/
+!modules/client/build/
+!modules/client/build/install/
+!modules/client/build/install/client/**
+!Dockerfile

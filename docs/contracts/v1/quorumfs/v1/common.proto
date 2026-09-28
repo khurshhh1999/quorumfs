@@ -1,0 +1,37 @@
+syntax = "proto3";
+package quorumfs.v1;
+option java_package = "io.quorumfs.protocol.v1";
+option java_multiple_files = true;
+
+message ObjectKey { string namespace = 1; bytes key = 2; }
+message VersionVector { map<string, uint64> counters = 1; }
+message ClusterIdentity { string cluster_id = 1; uint64 epoch = 2; }
+message VersionMetadata {
+  string version_id = 1;
+  VersionVector vector = 2;
+  uint64 size = 3;
+  bytes sha256 = 4;
+  bool tombstone = 5;
+}
+message ObjectChunk { uint64 offset = 1; bytes data = 2; bytes sha256 = 3; }
+message WriteHeader {
+  ObjectKey object = 1;
+  string request_id = 2;
+  VersionVector context = 3;
+  uint64 size = 4;
+  bytes sha256 = 5;
+}
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  INVALID_REQUEST = 1;
+  QUORUM_UNAVAILABLE = 2;
+  OUTCOME_UNKNOWN = 3;
+  CONFLICT = 4;
+  CHECKSUM_MISMATCH = 5;
+  CAPACITY_EXHAUSTED = 6;
+  EPOCH_MISMATCH = 7;
+  ACCESS_DENIED = 8;
+  OBJECT_NOT_FOUND = 9;
+}
+// Serialized as quorumfs-error-bin gRPC trailing metadata on failures.
+message ErrorDetail { ErrorReason reason = 1; bool outcome_unknown = 2; }

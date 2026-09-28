@@ -1,0 +1,184 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  format-static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew spotlessCheck classes && docker compose -f infra/compose/compose.yaml config --quiet
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: format-static-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: unit-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  integration-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew integrationTest :protocol:test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: integration-contract-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  fault-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew faultTest
+      - run: docker compose -f infra/compose/compose.yaml up --build --wait --wait-timeout 180
+      - run: ./gradlew smokeTest && python3 tests/system/proxy_fault.py
+      - if: always()
+        run: |
+          mkdir -p build/reports/compose
+          docker compose -f infra/compose/compose.yaml logs --no-color > build/reports/compose/cluster.log
+          docker compose -f infra/compose/compose.yaml down
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: fault-smoke-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew assemble :server:installDist :client:installDist
+      - run: docker build -t quorumfs:ci .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: build-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
+      - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
+      - run: ./gradlew :server:installDist :client:installDist
+      - run: docker build -t quorumfs:ci .
+      - run: mkdir -p build/reports
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          version: 'v0.74.0'
+          scan-type: image
+          image-ref: quorumfs:ci
+          format: cyclonedx
+          output: build/reports/sbom.cdx.json
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          version: 'v0.74.0'
+          scan-type: image
+          image-ref: quorumfs:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: json
+          output: build/reports/image-security.json
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        if: always()
+        with:
+          version: 'v0.74.0'
+          scan-type: fs
+          scanners: secret
+          scan-ref: .
+          exit-code: '1'
+          format: json
+          output: build/reports/secrets.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: security-reports
+          retention-days: 14
+          path: |
+            build/reports/
+            modules/*/build/reports/
+            modules/*/build/test-results/
+  ci-gate:
+    if: always()
+    needs: [format-static, unit, integration-contract, fault-smoke, build, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every gate to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert len(results) == 6
+          assert all(job['result'] == 'success' for job in results.values()), results
+          PY

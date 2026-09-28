@@ -1,8 +1,37 @@
+# Local tools and caches
 .gradle/
-**/build/
 .tools/
 .DS_Store
-*.log
 .idea/
 *.iml
 __pycache__/
+*.py[cod]
+
+# Generated build, test, coverage and packaging output
+**/build/
+**/out/
+**/dist/
+**/reports/
+**/test-results/
+**/coverage/
+**/artifacts/
+*.log
+*.class
+*.jar
+*.war
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.pb
+*.desc
+
+# Required Gradle bootstrap tooling is source-controlled.
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local execution evidence; Markdown documentation remains trackable.
+/docs/evidence/**/*.json
+/docs/evidence/**/*.xml
+/docs/evidence/**/*.html
+/docs/evidence/**/*.png
+/docs/handoffs/phase-1-files.md

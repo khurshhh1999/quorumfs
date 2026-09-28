@@ -1,0 +1,33 @@
+syntax = "proto3";
+package quorumfs.v1;
+option java_package = "io.quorumfs.protocol.v1";
+option java_multiple_files = true;
+import "quorumfs/v1/common.proto";
+service ObjectStore {
+  rpc PutObject(stream PutObjectRequest) returns (WriteResult);
+  rpc GetObject(GetObjectRequest) returns (stream GetObjectResponse);
+  rpc HeadObject(HeadObjectRequest) returns (HeadObjectResponse);
+  rpc DeleteObject(DeleteObjectRequest) returns (WriteResult);
+  rpc ResolveObject(stream PutObjectRequest) returns (WriteResult);
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (ClusterInfo);
+}
+message PutObjectRequest { oneof frame { WriteHeader header = 1; ObjectChunk chunk = 2; } }
+message WriteResult { VersionMetadata version = 1; uint32 durable_owner_count = 2; }
+message GetObjectRequest { ObjectKey object = 1; string version_id = 2; }
+message VersionSet { repeated VersionMetadata versions = 1; }
+message GetObjectResponse { oneof frame { VersionMetadata header = 1; ObjectChunk chunk = 2; VersionSet conflict = 3; } }
+message HeadObjectRequest { ObjectKey object = 1; }
+message HeadObjectResponse { repeated VersionMetadata versions = 1; }
+message DeleteObjectRequest { ObjectKey object = 1; string request_id = 2; VersionVector context = 3; }
+message GetClusterInfoRequest {}
+message Node { string node_id = 1; string endpoint = 2; }
+message ClusterInfo {
+  ClusterIdentity identity = 1;
+  string node_id = 2;
+  repeated Node members = 3;
+  uint32 replication_factor = 4;
+  uint32 read_quorum = 5;
+  uint32 write_quorum = 6;
+  string api_version = 7;
+  bool object_api_ready = 8;
+}
