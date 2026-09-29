@@ -1,0 +1,32 @@
+[
+  {
+    "name": "node1",
+    "listen": "0.0.0.0:9001",
+    "upstream": "node1:9000",
+    "enabled": true
+  },
+  {
+    "name": "node2",
+    "listen": "0.0.0.0:9002",
+    "upstream": "node2:9000",
+    "enabled": true
+  },
+  {
+    "name": "node3",
+    "listen": "0.0.0.0:9003",
+    "upstream": "node3:9000",
+    "enabled": true
+  },
+  {
+    "name": "node4",
+    "listen": "0.0.0.0:9004",
+    "upstream": "node4:9000",
+    "enabled": true
+  },
+  {
+    "name": "node5",
+    "listen": "0.0.0.0:9005",
+    "upstream": "node5:9000",
+    "enabled": true
+  }
+]

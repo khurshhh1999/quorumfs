@@ -1,0 +1,27 @@
+syntax = "proto3";
+package quorumfs.v1;
+option java_package = "io.quorumfs.protocol.v1";
+option java_multiple_files = true;
+import "quorumfs/v1/common.proto";
+service ReplicaStore {
+  rpc ReplicateVersion(stream ReplicaFrame) returns (ReplicaAck);
+  rpc ReadVersions(ReplicaReadRequest) returns (ReplicaVersions);
+  rpc FetchVersion(FetchVersionRequest) returns (stream ReplicaFrame);
+  rpc ApplyTombstone(TombstoneRequest) returns (ReplicaAck);
+  rpc ExchangeMerkle(MerkleRequest) returns (MerkleResponse);
+  rpc FetchRangeVersions(RangeRequest) returns (stream RangeVersion);
+  rpc DeliverHint(stream ReplicaFrame) returns (ReplicaAck);
+}
+message ReplicaHeader { ClusterIdentity cluster = 1; ObjectKey object = 2; VersionMetadata version = 3; string request_id = 4; }
+message ReplicaFrame { oneof frame { ReplicaHeader header = 1; ObjectChunk chunk = 2; } }
+message ReplicaAck { ClusterIdentity cluster = 1; string node_id = 2; string version_id = 3; bool durable = 4; }
+message ReplicaReadRequest { ClusterIdentity cluster = 1; ObjectKey object = 2; }
+message ReplicaVersions { ClusterIdentity cluster = 1; string node_id = 2; repeated VersionMetadata versions = 3; }
+message FetchVersionRequest { ClusterIdentity cluster = 1; ObjectKey object = 2; string version_id = 3; }
+message TombstoneRequest { ReplicaHeader header = 1; }
+message TokenRange { bytes start_exclusive = 1; bytes end_inclusive = 2; }
+message MerkleRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; uint32 depth = 4; }
+message MerkleNode { TokenRange range = 1; bytes sha256 = 2; }
+message MerkleResponse { ClusterIdentity cluster = 1; string snapshot_id = 2; repeated MerkleNode nodes = 3; }
+message RangeRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; bytes resume_token = 4; uint32 limit = 5; }
+message RangeVersion { ObjectKey object = 1; VersionMetadata version = 2; bytes resume_token = 3; }

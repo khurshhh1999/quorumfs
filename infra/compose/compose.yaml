@@ -1,0 +1,81 @@
+name: quorumfs-dev
+x-node: &node
+  image: quorumfs:local
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  init: true
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777,exec
+  environment:
+    JAVA_OPTS: "-Xms32m -Xmx128m -XX:MaxDirectMemorySize=64m -XX:ActiveProcessorCount=2"
+  mem_limit: 384m
+  cpus: 1.0
+  healthcheck:
+    test: ["CMD", "/opt/quorumfs/client/bin/client", "health", "localhost:9000", "--insecure"]
+    interval: 10s
+    timeout: 5s
+    start_period: 20s
+    retries: 6
+services:
+  node1:
+    <<: *node
+    command: ["/etc/quorumfs/node.properties"]
+    volumes:
+      - node1-data:/var/lib/quorumfs
+      - ./nodes/node1.properties:/etc/quorumfs/node.properties:ro
+  node2:
+    <<: *node
+    command: ["/etc/quorumfs/node.properties"]
+    volumes:
+      - node2-data:/var/lib/quorumfs
+      - ./nodes/node2.properties:/etc/quorumfs/node.properties:ro
+  node3:
+    <<: *node
+    command: ["/etc/quorumfs/node.properties"]
+    volumes:
+      - node3-data:/var/lib/quorumfs
+      - ./nodes/node3.properties:/etc/quorumfs/node.properties:ro
+  node4:
+    <<: *node
+    command: ["/etc/quorumfs/node.properties"]
+    volumes:
+      - node4-data:/var/lib/quorumfs
+      - ./nodes/node4.properties:/etc/quorumfs/node.properties:ro
+  node5:
+    <<: *node
+    command: ["/etc/quorumfs/node.properties"]
+    volumes:
+      - node5-data:/var/lib/quorumfs
+      - ./nodes/node5.properties:/etc/quorumfs/node.properties:ro
+  proxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    command: ["-host=0.0.0.0", "-config=/config/proxies.json"]
+    volumes:
+      - ./proxies.json:/config/proxies.json:ro
+    ports:
+      - "127.0.0.1:18474:8474"
+      - "127.0.0.1:19001:9001"
+      - "127.0.0.1:19002:9002"
+      - "127.0.0.1:19003:9003"
+      - "127.0.0.1:19004:9004"
+      - "127.0.0.1:19005:9005"
+    depends_on:
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+      node3:
+        condition: service_healthy
+      node4:
+        condition: service_healthy
+      node5:
+        condition: service_healthy
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:

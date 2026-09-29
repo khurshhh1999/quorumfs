@@ -1,0 +1,25 @@
+apply plugin: 'com.google.protobuf'
+dependencies {
+    api platform('io.grpc:grpc-bom:1.84.0')
+    api 'io.grpc:grpc-protobuf'
+    api 'io.grpc:grpc-stub'
+    api 'com.google.protobuf:protobuf-java:4.36.2'
+}
+sourceSets { baseline { proto { srcDir rootProject.file('docs/contracts/v1') } } }
+def protocolPlatform = providers.gradleProperty('protocolPlatform').getOrElse(osdetector.classifier)
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:4.36.2:${protocolPlatform}@exe" }
+    plugins { grpc { artifact = "io.grpc:protoc-gen-grpc-java:1.84.0:${protocolPlatform}@exe" } }
+    generateProtoTasks {
+        all().configureEach {
+            plugins { grpc {} }
+            generateDescriptorSet = true
+            descriptorSetOptions.includeImports = true
+        }
+    }
+}
+tasks.named('test') {
+    dependsOn 'generateProto', 'generateBaselineProto'
+    systemProperty 'quorumfs.baseline', layout.buildDirectory.file('generated/sources/proto/baseline/descriptor_set.desc').get().asFile
+    systemProperty 'quorumfs.descriptor', layout.buildDirectory.file('generated/sources/proto/main/descriptor_set.desc').get().asFile
+}

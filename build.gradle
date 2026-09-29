@@ -1,0 +1,57 @@
+plugins {
+    id 'base'
+    id 'com.google.protobuf' version '0.10.0' apply false
+    id 'com.diffplug.spotless' version '8.10.3' apply false
+}
+allprojects { group = 'io.quorumfs'; version = '0.1.0-SNAPSHOT' }
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'com.diffplug.spotless'
+    java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+    dependencyLocking { lockAllConfigurations() }
+    tasks.register('resolveDependencies') {
+        doLast { configurations.findAll { it.canBeResolved }.each { it.resolve() } }
+    }
+    dependencies {
+        testImplementation platform('org.junit:junit-bom:6.1.3')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += ['-Xlint:all', '-Werror']
+    }
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging { events 'failed', 'skipped'; showStandardStreams = true }
+        systemProperty 'quorumfs.seed', '20260928'
+    }
+    spotless { java { target 'src/**/*.java'; googleJavaFormat('1.33.0') } }
+    tasks.withType(AbstractArchiveTask).configureEach {
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+}
+tasks.register('spotlessCheck') { dependsOn subprojects.collect { it.tasks.named('spotlessCheck') } }
+tasks.register('spotlessApply') { dependsOn subprojects.collect { it.tasks.named('spotlessApply') } }
+tasks.register('test') { dependsOn subprojects.collect { it.tasks.named('test') } }
+tasks.register('integrationTest', Exec) {
+    dependsOn ':server:installDist', ':client:installDist', ':storage:test'
+    commandLine 'python3', 'tests/system/cluster.py', 'integration'
+}
+tasks.register('faultTest', Exec) {
+    dependsOn ':server:installDist', ':client:installDist'
+    commandLine 'python3', 'tests/system/cluster.py', 'fault'
+}
+tasks.register('smokeTest', Exec) {
+    dependsOn ':client:installDist'
+    commandLine 'python3', 'tests/system/cluster.py', 'smoke'
+}
+tasks.register('benchmark') {
+    doLast { throw new GradleException('No storage implementation exists in Q0; no benchmark is available.') }
+}
+tasks.register('resolveDependencies') {
+    dependsOn subprojects.collect { it.tasks.named('resolveDependencies') }
+}
+tasks.named('check') { dependsOn subprojects.collect { it.tasks.named('check') }; dependsOn 'integrationTest' }
+tasks.named('assemble') { dependsOn ':server:distTar', ':client:distTar' }

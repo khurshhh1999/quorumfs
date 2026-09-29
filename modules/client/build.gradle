@@ -1,0 +1,7 @@
+apply plugin: 'application'
+dependencies {
+    implementation project(':protocol')
+    implementation 'io.grpc:grpc-netty-shaded:1.84.0'
+    implementation 'io.grpc:grpc-services:1.84.0'
+}
+application { mainClass = 'io.quorumfs.client.ClientMain' }
