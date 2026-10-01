@@ -35,12 +35,16 @@ subprojects {
 tasks.register('spotlessCheck') { dependsOn subprojects.collect { it.tasks.named('spotlessCheck') } }
 tasks.register('spotlessApply') { dependsOn subprojects.collect { it.tasks.named('spotlessApply') } }
 tasks.register('test') { dependsOn subprojects.collect { it.tasks.named('test') } }
+tasks.register('storageIntegrationTest', Exec) {
+    dependsOn ':server:installDist'
+    commandLine 'python3', 'tests/system/storage_cli.py'
+}
 tasks.register('integrationTest', Exec) {
-    dependsOn ':server:installDist', ':client:installDist', ':storage:test'
+    dependsOn ':server:installDist', ':client:installDist', ':storage:test', 'storageIntegrationTest'
     commandLine 'python3', 'tests/system/cluster.py', 'integration'
 }
 tasks.register('faultTest', Exec) {
-    dependsOn ':server:installDist', ':client:installDist'
+    dependsOn ':server:installDist', ':client:installDist', ':storage:storageFaultTest'
     commandLine 'python3', 'tests/system/cluster.py', 'fault'
 }
 tasks.register('smokeTest', Exec) {
@@ -48,7 +52,7 @@ tasks.register('smokeTest', Exec) {
     commandLine 'python3', 'tests/system/cluster.py', 'smoke'
 }
 tasks.register('benchmark') {
-    doLast { throw new GradleException('No storage implementation exists in Q0; no benchmark is available.') }
+    doLast { throw new GradleException('No controlled distributed benchmark is implemented yet; functional storage tests are not benchmarks.') }
 }
 tasks.register('resolveDependencies') {
     dependsOn subprojects.collect { it.tasks.named('resolveDependencies') }

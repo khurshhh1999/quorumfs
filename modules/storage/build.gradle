@@ -1,1 +1,14 @@
 dependencies { api 'org.rocksdb:rocksdbjni:10.10.1' }
+
+tasks.named('test') {
+    useJUnitPlatform { excludeTags 'storage-process' }
+    systemProperty 'storage.test.classpath', sourceSets.test.runtimeClasspath.asPath
+}
+tasks.register('storageFaultTest', Test) {
+    description = 'Real separate-JVM kill boundaries and bounded-heap streaming.'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'storage-process' }
+    systemProperty 'storage.test.classpath', sourceSets.test.runtimeClasspath.asPath
+    shouldRunAfter tasks.named('test')
+}

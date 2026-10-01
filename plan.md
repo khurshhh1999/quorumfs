@@ -3,7 +3,7 @@
 ## Objective and boundaries
 Build a five-node leaderless object store using Java, gRPC, RocksDB and Docker, with consistent hashing, chunked streaming, version vectors, configurable strict quorums, hinted handoff, read repair, Merkle anti-entropy, checksums, tombstones and fail-closed behavior. Validate with a reproducible campaign of at least 10,000 operations.
 
-Phase 1 is implemented as Q0 (initial bootstrap). Q1–Q8 remain pending. Q0 local checks pass; remote CI still requires the owner. `implementation.md` is the detailed design; `delivery.md` supplies CI/CD and owner-run Git/PR rules. No POSIX filesystem, S3 compatibility, dynamic membership, linearizability, or multi-region promise is in v1 scope.
+Phase 1 / Q0 is merged in PR #1. Phase 2 / Q1 implements durable local storage and passes local validation; owner commit/push and remote CI are pending. Q2–Q8 remain pending. `implementation.md` is the detailed design; `delivery.md` supplies CI/CD and owner-run Git/PR rules. No POSIX filesystem, S3 compatibility, dynamic membership, linearizability, or multi-region promise is in v1 scope.
 
 ## Ordered milestones and PR slices
 
@@ -17,9 +17,11 @@ Evidence: `docs/evidence/Q0/README.md`. Pinned build, formatter, warnings-as-err
 Acceptance: clean checkout build and five process health checks; protobuf compatibility gate; all containers use unique stable identities. Suggested PR: `build: bootstrap five-node storage workspace`.
 
 ### Q1 - Durable single-node storage (depends Q0)
-- [ ] RocksDB column families, versioned key encoding, native resource management and durable counters.
-- [ ] Streaming staging, chunk/whole-object checksum verification, atomic manifest publication, cancellation cleanup and size limits.
-- [ ] Restart recovery, disk-full/sync-error paths and backup/restore test.
+- [x] RocksDB column families, versioned key encoding, native resource management and durable counters.
+- [x] Streaming staging, chunk/whole-object checksum verification, atomic manifest publication, cancellation cleanup and size limits.
+- [x] Restart recovery, disk-full/sync-error paths and backup/restore test.
+Evidence: `docs/evidence/Q1/README.md`. Local immutable versions and offline CLI only; distributed RPC readiness remains false.
+
 Acceptance: acknowledged object survives restart; crashes before commit expose no partial object; missing/corrupt chunks are never served as valid; memory usage bounded by stream concurrency rather than full object size.
 
 ### Q2 - Ring and causal versions (depends Q1)
@@ -87,8 +89,9 @@ Create `docs/evidence/Qx/` containing command/results, environment, seed, histor
 
 | Milestone | Status | PR | Evidence |
 | --- | --- | --- | --- |
-| Q0 / Phase 1 | Locally verified; remote CI pending | Not created | `docs/evidence/Q0/README.md` |
-| Q1–Q8 | Not started | None | None |
+| Q0 / Phase 1 | Merged | #1 | `docs/evidence/Q0/README.md` |
+| Q1 / Phase 2 | Locally verified; owner handoff and remote CI pending | Not created | `docs/evidence/Q1/README.md` |
+| Q2–Q8 | Not started | None | None |
 
 The clean-build evidence is a source-only copy, not a Git checkout, because dedicated repository initialization is owner-controlled. Do not backfill results from source text or infer that local process crashes validate hardware power-loss durability.
 

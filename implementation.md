@@ -1,6 +1,12 @@
 # QuorumFS implementation specification
 
-Status: Q0 bootstrap implemented and locally verified; the remaining sections describe planned object-store behavior. Five gRPC processes/containers can report health and cluster information, with persistent identities. No object store or measured object durability result exists. Source scope: QuorumFS project in Interview.pdf. Source dates/results are not evidence for a new implementation.
+Status: Q0 bootstrap and Q1 local storage are implemented and locally verified.
+The server opens the durable storage engine; its distributed data RPCs remain
+UNIMPLEMENTED. Offline local commands support put/get/verify/checkpoint/restore.
+Ring, vectors, quorum coordination, deletion and repair below remain proposed.
+See `docs/adr/0003-durable-local-storage.md` and `docs/evidence/Q1/README.md` for
+implemented storage semantics and evidence. No distributed durability or
+performance result is claimed.
 
 ## Architecture and scope
 
