@@ -20,6 +20,13 @@ dependency lockfiles and checksum metadata remain required build inputs.
 The completed PR body is `docs/handoffs/phase-1-pr.md`. The agent has not
 committed, pushed, created a PR, configured branch protections, or merged.
 
+## Phase 2 handoff
+
+Current branch: `codex/pr-2`, based on merged PR #1 / `origin/main`.
+Use `docs/handoffs/phase-2-commands.md`; PR body is
+`docs/handoffs/phase-2-pr.md`. Local storage tests and fault checks are implemented;
+remote CI at the new head remains owner-pending. Generated reports stay ignored.
+
 ## Build command contract
 Implement and verify a pinned Gradle wrapper and these commands in milestone 0:
 
@@ -34,7 +41,7 @@ Implement and verify a pinned Gradle wrapper and these commands in milestone 0:
 | `./gradlew smokeTest` | Black-box smoke against the selected local/staging environment |
 | `./gradlew benchmark` | Opt-in controlled benchmark; output raw data and environment metadata |
 
-These tasks exist in Q0. Integration and fault tests cover bootstrap health, identity persistence and process recovery only; the Compose proxy test covers disconnect/reconnect. `benchmark` fails explicitly until storage exists. Full storage, recovery and causal-history cases remain in their later milestones. Keep long fault/benchmark tasks outside ordinary `check`; the Q0 fault subset runs on every PR.
+These tasks exist. Integration and fault tests now include local storage, verified CLI backup/restore, five storage kill boundaries and bounded-heap streaming; the Compose proxy test covers disconnect/reconnect. `benchmark` fails explicitly until a controlled distributed workload exists. The real native ENOSPC fixture runs separately in CI. Distributed recovery and causal-history cases remain in their later milestones. Keep long fault/benchmark tasks outside ordinary `check`; the Q0 fault subset runs on every PR.
 
 ## Required PR CI
 Create `.github/workflows/ci.yml` on `pull_request` and pushes to the protected base branch. Run on a clean checkout with a pinned JDK/toolchain and service images. Cancel superseded PR runs, set job timeouts, cache dependencies using verified lock/build inputs, and always upload test reports even on failure.

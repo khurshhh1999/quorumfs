@@ -81,6 +81,7 @@ jobs:
           java-version: '21.0.12+101.0.LTS' # Adoptium SemVer for JDK 21.0.12.1+1
       - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947
       - run: ./gradlew faultTest
+      - run: python3 tests/system/storage_disk_full.py
       - run: docker compose -f infra/compose/compose.yaml up --build --wait --wait-timeout 180
       - run: ./gradlew smokeTest && python3 tests/system/proxy_fault.py
       - if: always()

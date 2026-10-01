@@ -6,7 +6,7 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.grpc.stub.StreamObserver;
 import io.quorumfs.protocol.v1.*;
-import io.quorumfs.storage.IdentityStore;
+import io.quorumfs.storage.ObjectStorage;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
@@ -14,9 +14,16 @@ public final class ServerMain {
   private ServerMain() {}
 
   public static void main(String[] args) throws Exception {
+    if (args.length > 0 && args[0].equals("storage")) {
+      StorageMain.main(java.util.Arrays.copyOfRange(args, 1, args.length));
+      return;
+    }
     if (args.length != 1) throw new IllegalArgumentException("Usage: server <node.properties>");
     NodeConfig config = NodeConfig.load(Path.of(args[0]));
-    IdentityStore identity = new IdentityStore(config.dataDir(), config.identity());
+    ObjectStorage storage = new ObjectStorage(config.dataDir(), config.identity());
+    System.out.printf(
+        "event=storage_open node=%s recovered_uploads=%d%n",
+        config.nodeId(), storage.stats().recovered());
     HealthStatusManager health = new HealthStatusManager();
     health.setStatus("", ServingStatus.NOT_SERVING);
     health.setStatus(ObjectStoreGrpc.SERVICE_NAME, ServingStatus.NOT_SERVING);
@@ -31,7 +38,7 @@ public final class ServerMain {
     try {
       server.start();
     } catch (Exception e) {
-      identity.close();
+      storage.close();
       throw e;
     }
     Runtime.getRuntime()
@@ -49,7 +56,7 @@ public final class ServerMain {
                     server.shutdownNow();
                     Thread.currentThread().interrupt();
                   } finally {
-                    identity.close();
+                    storage.close();
                   }
                 },
                 "quorumfs-shutdown"));
