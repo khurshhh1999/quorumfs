@@ -13,7 +13,8 @@ public final class StorageProcess {
 
   public static void main(String[] args) throws Exception {
     Path directory = Path.of(args[0]), signal = Path.of(args[2]);
-    String mode = args[1];
+    boolean causal = args[1].startsWith("causal-");
+    String mode = args[1].replace("causal-", "");
     ObjectStorage.Faults hook =
         point -> {
           if (mode.equals(point.name())) {
@@ -42,7 +43,13 @@ public final class StorageProcess {
             ObjectStorage.Limits.defaults(),
             hook,
             System::nanoTime)) {
-      var upload = store.begin("test", new byte[] {1}, size, digest.digest());
+      if (causal) store.configureRing(CausalStorageTest.ring(), "node1");
+      byte[] hash = digest.digest();
+      var upload =
+          causal
+              ? store.beginCausal(
+                  "test", new byte[] {1}, size, hash, io.quorumfs.versioning.VectorClock.empty())
+              : store.begin("test", new byte[] {1}, size, hash);
       ready(signal.resolveSibling(signal.getFileName() + ".version"), upload.id().toString());
       try {
         for (long offset = 0; offset < size; offset += chunk.length)

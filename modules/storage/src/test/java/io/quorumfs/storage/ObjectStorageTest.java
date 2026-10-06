@@ -411,7 +411,7 @@ class ObjectStorageTest {
     raw(database(), action);
   }
 
-  private void raw(Path path, RawAction action) throws Exception {
+  static void raw(Path path, RawAction action) throws Exception {
     List<ColumnFamilyOptions> options = new ArrayList<>();
     List<ColumnFamilyHandle> handles = new ArrayList<>();
     try (DBOptions dbOptions = new DBOptions()) {

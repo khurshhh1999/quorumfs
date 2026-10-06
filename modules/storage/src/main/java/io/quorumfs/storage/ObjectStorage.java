@@ -2,6 +2,9 @@ package io.quorumfs.storage;
 
 import static io.quorumfs.storage.StorageException.Code.*;
 
+import io.quorumfs.ring.HashRing;
+import io.quorumfs.versioning.Siblings;
+import io.quorumfs.versioning.VectorClock;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
@@ -14,7 +17,10 @@ import java.util.*;
 import java.util.function.LongSupplier;
 import org.rocksdb.*;
 
-/** Durable immutable local versions. No quorum, causal ordering, or distributed acknowledgments. */
+/**
+ * Durable immutable local versions. Causal metadata is atomic with publication; no distributed
+ * acknowledgments.
+ */
 public final class ObjectStorage implements AutoCloseable {
   public static final int CHUNK_BYTES = 256 * 1024;
   public static final long MAX_OBJECT_BYTES = 64L * 1024 * 1024;
@@ -29,11 +35,15 @@ public final class ObjectStorage implements AutoCloseable {
           "requests",
           "hints",
           "tombstones",
-          "ring");
+          "ring",
+          "heads");
   private static final byte[] IDENTITY = "identity/v1".getBytes(StandardCharsets.UTF_8);
   private static final byte[] FORMAT = "storage-format".getBytes(StandardCharsets.UTF_8);
   private static final byte[] COUNTER = new byte[] {1};
   private static final byte[] FORMAT_V1 = new byte[] {1};
+  private static final byte[] RING = {1}, NODE = {2};
+  private HashRing ring;
+  private String node;
   private final Path directory;
   private final String identity;
   private final Limits limits;
@@ -162,6 +172,16 @@ public final class ObjectStorage implements AutoCloseable {
         batch.put(FORMAT, FORMAT_V1);
         db.write(write, batch);
       }
+      byte[] persistedRing = db.get(cf("ring"), RING);
+      byte[] persistedNode = db.get(cf("ring"), NODE);
+      if ((persistedRing == null) != (persistedNode == null))
+        throw new StorageException(CORRUPT, "Incomplete ring identity");
+      if (persistedRing != null) {
+        ring = HashRing.deserialize(persistedRing);
+        node = new String(persistedNode, StandardCharsets.UTF_8);
+        if (!ring.nodeIds().contains(node))
+          throw new StorageException(CORRUPT, "Invalid ring node");
+      }
       recover();
     } catch (RocksDBException e) {
       close();
@@ -218,11 +238,13 @@ public final class ObjectStorage implements AutoCloseable {
   }
 
   /** Allocated synchronously; cancellation and failed uploads never recycle sequence numbers. */
-  private long allocate() throws IOException, RocksDBException {
+  private long allocate(long minimum) throws IOException, RocksDBException {
     byte[] raw = db.get(cf("counters"), COUNTER);
     if (raw != null && raw.length != 8)
       throw new StorageException(CORRUPT, "Invalid counter encoding");
-    long previous = raw == null ? 0 : ByteBuffer.wrap(raw).getLong();
+    long stored = raw == null ? 0 : ByteBuffer.wrap(raw).getLong();
+    if (stored < 0) throw new StorageException(CORRUPT, "Invalid counter");
+    long previous = Math.max(stored, minimum);
     if (previous < 0 || previous == Long.MAX_VALUE)
       throw new StorageException(CAPACITY, "Counter exhausted or invalid");
     long next = previous + 1;
@@ -235,18 +257,37 @@ public final class ObjectStorage implements AutoCloseable {
 
   public synchronized Upload begin(String namespace, byte[] key, long size, byte[] sha256)
       throws IOException {
+    return beginVersion(namespace, key, size, sha256, null, false);
+  }
+
+  private Upload beginVersion(
+      String namespace, byte[] key, long size, byte[] sha256, VectorClock context, boolean replica)
+      throws IOException {
     open();
     expire();
     objectKey(namespace, key);
+    if (context != null) {
+      if (ring == null) throw new StorageException(INVALID, "Configure ring before causal writes");
+      context.requireMembers(ring.nodeIds());
+      if (replica && context.counters().isEmpty())
+        throw new StorageException(INVALID, "Empty replica vector");
+    }
+    requireKind(prefix(namespace, key), context != null);
     if (size < 0 || size > limits.maxObjectBytes() || sha256 == null || sha256.length != 32)
       throw new StorageException(INVALID, "Invalid size or SHA-256");
     if (uploads.size() >= limits.maxUploads())
       throw new StorageException(CAPACITY, "Upload capacity exhausted");
     UUID id = UUID.randomUUID();
     try {
-      long sequence = allocate();
+      long sequence = allocate(context == null ? 0 : context.get(node));
       Upload upload =
-          new Upload(id, StorageKeys.manifest(namespace, key, id), sequence, size, sha256.clone());
+          new Upload(
+              id,
+              StorageKeys.manifest(namespace, key, id),
+              sequence,
+              size,
+              sha256.clone(),
+              context == null ? null : replica ? context : context.with(node, sequence));
       faults.at(Point.STAGE_WRITE);
       try (WriteOptions write = sync()) {
         db.put(cf("staging"), write, StorageKeys.id(id), upload.manifestKey);
@@ -257,6 +298,184 @@ public final class ObjectStorage implements AutoCloseable {
       throw failure(e);
     } catch (IOException e) {
       if (e instanceof StorageException) throw e;
+      throw failure(e);
+    }
+  }
+
+  /** Persist the exact vnode map and local identity before allowing causal operations. */
+  public synchronized void configureRing(HashRing expected, String localNode) throws IOException {
+    open();
+    if (!expected.nodeIds().contains(localNode))
+      throw new StorageException(INVALID, "Unknown local node");
+    if (ring != null) {
+      ring.requireCompatible(expected);
+      if (!node.equals(localNode))
+        throw new StorageException(INVALID, "Local counter identity mismatch");
+      return;
+    }
+    try (WriteBatch batch = new WriteBatch();
+        WriteOptions write = sync()) {
+      batch.put(cf("ring"), RING, expected.serialize());
+      batch.put(cf("ring"), NODE, localNode.getBytes(StandardCharsets.UTF_8));
+      db.write(write, batch);
+      ring = expected;
+      node = localNode;
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  public synchronized Upload beginCausal(
+      String namespace, byte[] key, long size, byte[] sha256, VectorClock context)
+      throws IOException {
+    return beginVersion(namespace, key, size, sha256, Objects.requireNonNull(context), false);
+  }
+
+  /**
+   * Internal local ingestion primitive; callers must supply the peer's full fixed configuration.
+   */
+  public synchronized Upload beginReplica(
+      String namespace, byte[] key, long size, byte[] sha256, VectorClock vector, HashRing peer)
+      throws IOException {
+    open();
+    if (ring == null) throw new StorageException(INVALID, "Ring not configured");
+    ring.requireCompatible(peer);
+    return beginVersion(namespace, key, size, sha256, Objects.requireNonNull(vector), true);
+  }
+
+  /** Resolve precisely the observed contexts; a concurrent unobserved sibling remains visible. */
+  public synchronized Upload resolve(
+      String namespace, byte[] key, long size, byte[] sha256, Collection<UUID> observed)
+      throws IOException {
+    open();
+    if (observed.isEmpty() || observed.size() > Siblings.LIMIT)
+      throw new StorageException(INVALID, "Resolution needs 1..32 observed versions");
+    VectorClock context = VectorClock.empty();
+    for (UUID id : observed) {
+      head(namespace, key, id);
+      context = context.merge(vector(id));
+    }
+    return beginCausal(namespace, key, size, sha256, context);
+  }
+
+  public synchronized VectorClock vector(UUID id) throws IOException {
+    open();
+    try {
+      byte[] raw = db.get(cf("vectors"), StorageKeys.id(id));
+      if (raw == null) throw new StorageException(NOT_FOUND, "Causal version not found");
+      return checkedVector(raw);
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  private VectorClock checkedVector(byte[] raw) throws StorageException {
+    try {
+      if (ring == null) throw new IllegalArgumentException("Causal data without ring");
+      VectorClock vector = VectorClock.deserialize(raw);
+      vector.requireMembers(ring.nodeIds());
+      if (vector.counters().isEmpty()) throw new IllegalArgumentException("Empty stored vector");
+      return vector;
+    } catch (IllegalArgumentException e) {
+      throw new StorageException(CORRUPT, "Invalid vector", e);
+    }
+  }
+
+  private static boolean startsWith(byte[] value, byte[] prefix) {
+    return value.length >= prefix.length
+        && Arrays.equals(value, 0, prefix.length, prefix, 0, prefix.length);
+  }
+
+  private static byte[] prefix(String namespace, byte[] key) {
+    byte[] encoded = StorageKeys.manifest(namespace, key, new UUID(0, 0));
+    return Arrays.copyOf(encoded, encoded.length - 16);
+  }
+
+  private static byte[] manifestKey(byte[] prefix, UUID id) {
+    return ByteBuffer.allocate(prefix.length + 16)
+        .put(prefix)
+        .putLong(id.getMostSignificantBits())
+        .putLong(id.getLeastSignificantBits())
+        .array();
+  }
+
+  private static Siblings.Entry entry(Version version, VectorClock vector) {
+    return new Siblings.Entry(version.id(), vector, HexFormat.of().formatHex(version.sha256()));
+  }
+
+  private List<Siblings.Entry> heads(byte[] prefix) throws IOException, RocksDBException {
+    List<Siblings.Entry> result = new ArrayList<>();
+    try (RocksIterator iterator = db.newIterator(cf("heads"))) {
+      for (iterator.seek(prefix);
+          iterator.isValid() && startsWith(iterator.key(), prefix);
+          iterator.next()) {
+        UUID id = StorageKeys.manifestId(iterator.key());
+        result.add(
+            entry(
+                decode(id, db.get(cf("manifests"), iterator.key())),
+                checkedVector(iterator.value())));
+        if (result.size() > Siblings.LIMIT)
+          throw new StorageException(CORRUPT, "Too many persisted siblings");
+      }
+      iterator.status();
+    }
+    result.sort(Comparator.comparing(e -> e.id().toString()));
+    if (!Siblings.merge(result).equals(result))
+      throw new StorageException(CORRUPT, "Nonmaximal head index");
+    return List.copyOf(result);
+  }
+
+  public synchronized List<Siblings.Entry> siblings(String namespace, byte[] key)
+      throws IOException {
+    open();
+    objectKey(namespace, key);
+    try {
+      return heads(prefix(namespace, key));
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  private List<Siblings.Entry> mergedHeads(byte[] manifestKey, Version version, VectorClock vector)
+      throws IOException {
+    byte[] prefix = Arrays.copyOf(manifestKey, manifestKey.length - 16);
+    try {
+      // Check all immutable history, including versions already superseded by another head.
+      try (RocksIterator iterator = db.newIterator(cf("manifests"))) {
+        for (iterator.seek(prefix);
+            iterator.isValid() && startsWith(iterator.key(), prefix);
+            iterator.next()) {
+          UUID id = StorageKeys.manifestId(iterator.key());
+          VectorClock previous = checkedVector(db.get(cf("vectors"), StorageKeys.id(id)));
+          if (previous.equals(vector)
+              && !MessageDigest.isEqual(decode(id, iterator.value()).sha256(), version.sha256()))
+            throw new StorageException(CORRUPT, "Equal vector has different content");
+        }
+        iterator.status();
+      }
+      List<Siblings.Entry> candidates = new ArrayList<>(heads(prefix));
+      candidates.add(entry(version, vector));
+      return Siblings.merge(candidates);
+    } catch (IllegalStateException e) {
+      throw new StorageException(CAPACITY, "Sibling limit exceeded", e);
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  private void requireKind(byte[] prefix, boolean causal) throws IOException {
+    try (RocksIterator iterator = db.newIterator(cf("manifests"))) {
+      for (iterator.seek(prefix);
+          iterator.isValid() && startsWith(iterator.key(), prefix);
+          iterator.next()) {
+        byte[] raw = iterator.value();
+        decode(StorageKeys.manifestId(iterator.key()), raw);
+        if ((raw[0] == 2) != causal)
+          throw new StorageException(
+              INVALID, "Legacy and causal versions require separate object keys");
+      }
+      iterator.status();
+    } catch (RocksDBException e) {
       throw failure(e);
     }
   }
@@ -272,16 +491,19 @@ public final class ObjectStorage implements AutoCloseable {
     private final byte[] manifestKey;
     private final long sequence, size, started;
     private final byte[] expected;
+    private final VectorClock vector;
     private final MessageDigest checksum = digest();
     private long received;
     private boolean done;
 
-    private Upload(UUID id, byte[] key, long sequence, long size, byte[] expected) {
+    private Upload(
+        UUID id, byte[] key, long sequence, long size, byte[] expected, VectorClock vector) {
       this.id = id;
       this.manifestKey = key;
       this.sequence = sequence;
       this.size = size;
       this.expected = expected;
+      this.vector = vector;
       started = clock.getAsLong();
     }
 
@@ -341,14 +563,27 @@ public final class ObjectStorage implements AutoCloseable {
         live();
         if (received != size || !MessageDigest.isEqual(checksum.digest(), expected))
           invalid("Object size or whole-object checksum mismatch");
+        requireKind(Arrays.copyOf(manifestKey, manifestKey.length - 16), vector != null);
         Version result = new Version(id, sequence, size, expected);
+        List<Siblings.Entry> next =
+            vector == null ? List.of() : mergedHeads(manifestKey, result, vector);
         try {
           faults.at(Point.WAL_SYNC);
           db.syncWal();
           faults.at(Point.MANIFEST_WRITE);
           try (WriteBatch batch = new WriteBatch();
               WriteOptions write = sync()) {
-            batch.put(cf("manifests"), manifestKey, encode(result));
+            byte[] manifest = encode(result);
+            if (vector != null) {
+              manifest[0] = 2;
+              batch.put(cf("vectors"), StorageKeys.id(id), vector.serialize());
+              byte[] prefix = Arrays.copyOf(manifestKey, manifestKey.length - 16);
+              for (Siblings.Entry head : heads(prefix))
+                batch.delete(cf("heads"), manifestKey(prefix, head.id()));
+              for (Siblings.Entry head : next)
+                batch.put(cf("heads"), manifestKey(prefix, head.id()), head.clock().serialize());
+            }
+            batch.put(cf("manifests"), manifestKey, manifest);
             batch.put(cf("requests"), StorageKeys.id(id), manifestKey);
             batch.delete(cf("staging"), StorageKeys.id(id));
             db.write(write, batch);
@@ -397,7 +632,7 @@ public final class ObjectStorage implements AutoCloseable {
 
   private static Version decode(UUID id, byte[] bytes) throws StorageException {
     if (bytes == null) throw new StorageException(NOT_FOUND, "Version not found");
-    if (bytes.length != 53 || bytes[0] != 1)
+    if (bytes.length != 53 || (bytes[0] != 1 && bytes[0] != 2))
       throw new StorageException(CORRUPT, "Invalid manifest encoding");
     ByteBuffer b = ByteBuffer.wrap(bytes);
     b.get();
@@ -510,6 +745,20 @@ public final class ObjectStorage implements AutoCloseable {
           }
           Version version = decode(id, iterator.value());
           maximumSequence = Math.max(maximumSequence, version.sequence());
+          byte[] rawVector = db.get(cf("vectors"), StorageKeys.id(id));
+          if ((iterator.value()[0] == 2) != (rawVector != null))
+            throw new StorageException(CORRUPT, "Missing or unexpected causal metadata");
+          if (rawVector != null) {
+            VectorClock vector = checkedVector(rawVector);
+            if (vector.get(node) > version.sequence())
+              throw new StorageException(CORRUPT, "Counter behind causal version");
+            List<Siblings.Entry> visible = heads(Arrays.copyOf(key, key.length - 16));
+            Siblings.Entry entry = entry(version, vector);
+            List<Siblings.Entry> withVersion = new ArrayList<>(visible);
+            withVersion.add(entry);
+            if (!Siblings.merge(withVersion).equals(visible))
+              throw new StorageException(CORRUPT, "Causal head index inconsistent with history");
+          }
           scan(version, OutputStream.nullOutputStream());
           count++;
         }
@@ -528,6 +777,25 @@ public final class ObjectStorage implements AutoCloseable {
         }
         iterator.status();
       }
+      try (RocksIterator iterator = db.newIterator(cf("vectors"))) {
+        for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+          byte[] key = db.get(cf("requests"), iterator.key());
+          byte[] manifest = key == null ? null : db.get(cf("manifests"), key);
+          if (manifest == null || manifest[0] != 2)
+            throw new StorageException(CORRUPT, "Orphan causal vector");
+          checkedVector(iterator.value());
+        }
+        iterator.status();
+      }
+      try (RocksIterator iterator = db.newIterator(cf("heads"))) {
+        for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+          UUID id = StorageKeys.manifestId(iterator.key());
+          if (db.get(cf("manifests"), iterator.key()) == null
+              || !Arrays.equals(iterator.value(), db.get(cf("vectors"), StorageKeys.id(id))))
+            throw new StorageException(CORRUPT, "Orphan or inconsistent causal head");
+        }
+        iterator.status();
+      }
       byte[] counterBytes = db.get(cf("counters"), COUNTER);
       if ((counterBytes == null && maximumSequence > 0)
           || (counterBytes != null
@@ -538,8 +806,8 @@ public final class ObjectStorage implements AutoCloseable {
       if (count != indexed) throw new StorageException(CORRUPT, "Committed index count mismatch");
     } catch (RocksDBException e) {
       throw failure(e);
-    } catch (IllegalArgumentException e) {
-      throw new StorageException(CORRUPT, "Invalid committed key", e);
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      throw new StorageException(CORRUPT, "Invalid committed metadata", e);
     }
     return count;
   }

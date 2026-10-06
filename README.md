@@ -4,6 +4,8 @@ QuorumFS is a developer-preview foundation for a distributed object store with
 configurable replica and quorum settings. The current build runs five gRPC nodes,
 validates fixed membership, and provides a durable local RocksDB storage engine
 with offline upload, verified download, and checkpoint/restore commands.
+It also computes fixed ring ownership and stores causal versions with explicit
+conflict resolution.
 **Distributed object RPCs remain unimplemented** and return `UNIMPLEMENTED`.
 
 ## Run locally
@@ -63,6 +65,20 @@ content and removes unfinished staging data. Corruption fails closed.
 See [local storage and backup/restore](docs/runbooks/storage.md) for commands,
 error handling, limits and upgrade/rollback instructions.
 
+## Causal versions and ownership
+
+The offline tool supports `owners`, `put-causal`, `siblings` and `resolve`.
+Ownership uses 128 virtual nodes per physical node and returns distinct owners.
+Causal writes preserve concurrent siblings; resolving explicitly observed
+versions publishes selected content with their merged context. Ring identity,
+counters and causal metadata survive restart. See the tested
+[causal-version walkthrough](docs/runbooks/causal-versions.md).
+
+Existing local-only keys remain readable. Use a separate key or namespace for
+causal writes. Back up before upgrading: older binaries cannot open the new
+column-family layout. Do not originate causal writes from a stale checkpoint or
+run two restored copies with the same node identity.
+
 ## Configuration and limits
 
 Node files live in `infra/compose/nodes/`. Exactly five unique members are required.
@@ -72,7 +88,7 @@ configuration causes startup to fail. Do not erase a volume to bypass this check
 
 Transport is plaintext and requires explicit development-mode opt-in. Do not expose
 this preview to untrusted networks. Local versions use synchronous WAL publication and verified chunks. There is no
-authentication, replication, causal conflict handling or repair yet. This is an object-store project,
+authentication, network replication or repair yet. This is an object-store project,
 not a mounted filesystem, POSIX implementation or S3-compatible endpoint.
 
 ## Troubleshooting and support

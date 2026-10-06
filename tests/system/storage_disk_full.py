@@ -9,6 +9,8 @@ image = (ROOT / "Dockerfile").read_text().splitlines()[0].split()[1]
 assert "@sha256:" in image
 classpath = ":".join([
     "/workspace/modules/storage/build/classes/java/main",
+    "/workspace/modules/hash-ring/build/classes/java/main",
+    "/workspace/modules/versioning/build/classes/java/main",
     "/workspace/modules/storage/build/classes/java/test",
     "/workspace/modules/server/build/install/server/lib/rocksdbjni-10.10.1.jar",
 ])

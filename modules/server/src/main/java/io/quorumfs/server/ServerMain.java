@@ -21,6 +21,15 @@ public final class ServerMain {
     if (args.length != 1) throw new IllegalArgumentException("Usage: server <node.properties>");
     NodeConfig config = NodeConfig.load(Path.of(args[0]));
     ObjectStorage storage = new ObjectStorage(config.dataDir(), config.identity());
+    try {
+      storage.configureRing(config.ring(), config.nodeId());
+    } catch (Exception e) {
+      storage.close();
+      throw e;
+    }
+    System.out.printf(
+        "event=ring_loaded node=%s epoch=%d fingerprint=%s vnodes=128%n",
+        config.nodeId(), config.epoch(), config.ring().fingerprint());
     System.out.printf(
         "event=storage_open node=%s recovered_uploads=%d%n",
         config.nodeId(), storage.stats().recovered());
