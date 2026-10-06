@@ -7,7 +7,7 @@ The initial handoff contains documentation only. Do not describe planned functio
 
 ## Working rules
 - Inspect repository root, current branch, remote, status, and applicable instructions before editing. Preserve unrelated changes. Never run broad staging commands in a parent workspace.
-- Use a `codex/<short-scope>` branch in the dedicated project repository. If this folder resolves to the parent Playground repository, stop Git mutations and explain the independent-repository setup in `delivery.md`; continue safe file work.
+- Use the user-requested branch name (currently `pr-<number>`) in the dedicated project repository. If this folder resolves to the parent Playground repository, stop Git mutations and explain the independent-repository setup in `delivery.md`; continue safe file work.
 - Implement in small, reviewable increments. Add focused tests for behavior, failure cases, persistence, compatibility, and security boundaries. Never disable a gate to make CI green.
 - Keep contracts versioned, errors explicit, resource use bounded, and configuration validated at startup. No secrets, credentials, real customer data, or sensitive payloads in fixtures or logs.
 - Record consequential decisions in `docs/adr/`; document assumptions and rejected alternatives. Update the plan and runbooks with the actual state.

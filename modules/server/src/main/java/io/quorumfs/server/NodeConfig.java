@@ -105,6 +105,18 @@ public record NodeConfig(
         Integer.parseInt(p.getProperty("quorum.w")));
   }
 
+  public io.quorumfs.ring.HashRing ring() {
+    return new io.quorumfs.ring.HashRing(
+        clusterId,
+        epoch,
+        members.stream()
+            .map(m -> new io.quorumfs.ring.HashRing.Member(m.id(), m.endpoint()))
+            .toList(),
+        replicas,
+        reads,
+        writes);
+  }
+
   public String identity() {
     return "quorumfs-identity-v1\n"
         + clusterId

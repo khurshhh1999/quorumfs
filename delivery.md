@@ -8,7 +8,7 @@ Each project must have its own Git repository and remote. These folders initiall
 ## Phase 1 repository setup and handoff
 
 The owner has initialized the dedicated repository and created base commit
-`f72be99`. The current branch is `codex/phase-1-bootstrap`, and origin is
+`f72be99`. The Phase 1 branch was `codex/phase-1-bootstrap`, and origin is
 `https://github.com/khurshhh1999/quorumfs.git`. Do not repeat initial setup.
 
 Use `docs/handoffs/phase-1-commands.md` for the updated staging and review commands.
@@ -22,10 +22,19 @@ committed, pushed, created a PR, configured branch protections, or merged.
 
 ## Phase 2 handoff
 
-Current branch: `codex/pr-2`, based on merged PR #1 / `origin/main`.
+Phase 2 branch: `codex/pr-2`; PR #2 is now merged into `main`.
 Use `docs/handoffs/phase-2-commands.md`; PR body is
 `docs/handoffs/phase-2-pr.md`. Local storage tests and fault checks are implemented;
 remote CI at the new head remains owner-pending. Generated reports stay ignored.
+
+## Phase 3 handoff
+
+Current branch: `pr-3`, based on merged PR #2 / `origin/main` (`5560c6c`).
+Use `docs/handoffs/phase-3-commands.md` and `docs/handoffs/phase-3-pr.md`.
+Commit and PR title: **PR 3: consistent hashing and causal versions**.
+The branch follows the owner's requested name without a `codex/` prefix.
+Only source, tests and Markdown evidence belong in the change; build artifacts
+remain ignored. Owner commit, push, PR creation, review and merge remain pending.
 
 ## Build command contract
 Implement and verify a pinned Gradle wrapper and these commands in milestone 0:
@@ -41,7 +50,7 @@ Implement and verify a pinned Gradle wrapper and these commands in milestone 0:
 | `./gradlew smokeTest` | Black-box smoke against the selected local/staging environment |
 | `./gradlew benchmark` | Opt-in controlled benchmark; output raw data and environment metadata |
 
-These tasks exist. Integration and fault tests now include local storage, verified CLI backup/restore, five storage kill boundaries and bounded-heap streaming; the Compose proxy test covers disconnect/reconnect. `benchmark` fails explicitly until a controlled distributed workload exists. The real native ENOSPC fixture runs separately in CI. Distributed recovery and causal-history cases remain in their later milestones. Keep long fault/benchmark tasks outside ordinary `check`; the Q0 fault subset runs on every PR.
+These tasks exist. Integration and fault tests now include local storage, verified CLI backup/restore, five storage kill boundaries and bounded-heap streaming; the Compose proxy test covers disconnect/reconnect. `benchmark` fails explicitly until a controlled distributed workload exists. The real native ENOSPC fixture runs separately in CI. Causal-history and five-node ownership checks now run locally; distributed replication/recovery remain later milestones. Keep long fault/benchmark tasks outside ordinary `check`; the Q0 fault subset runs on every PR.
 
 ## Required PR CI
 Create `.github/workflows/ci.yml` on `pull_request` and pushes to the protected base branch. Run on a clean checkout with a pinned JDK/toolchain and service images. Cancel superseded PR runs, set job timeouts, cache dependencies using verified lock/build inputs, and always upload test reports even on failure.

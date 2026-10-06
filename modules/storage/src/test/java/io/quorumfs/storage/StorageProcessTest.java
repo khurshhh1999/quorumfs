@@ -33,12 +33,21 @@ class StorageProcessTest {
 
   @Test
   void realProcessKillsBeforeAndAfterPublicationPreserveTheCommitBoundary() throws Exception {
+    boundaries(false);
+  }
+
+  @Test
+  void causalMetadataAndHeadIndexShareTheCrashCommitBoundary() throws Exception {
+    boundaries(true);
+  }
+
+  private void boundaries(boolean causal) throws Exception {
     for (String mode :
         new String[] {"STAGED", "WAL_SYNC", "MANIFEST_WRITE", "AFTER_MANIFEST", "ACKNOWLEDGED"}) {
       Path directory = root.resolve(mode),
           signal = root.resolve(mode + ".ready"),
           log = root.resolve(mode + ".log");
-      Process process = start(directory, mode, signal, log);
+      Process process = start(directory, causal ? "causal-" + mode : mode, signal, log);
       try {
         long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
         while (!Files.exists(signal) && process.isAlive() && System.nanoTime() < deadline)
@@ -58,10 +67,29 @@ class StorageProcessTest {
                 StorageException.Code.NOT_FOUND,
                 assertThrows(StorageException.class, () -> store.head("test", new byte[] {1}, id))
                     .code());
-          assertEquals(2, ObjectStorageTest.put(store, new byte[0]).sequence());
+          if (causal) {
+            store.configureRing(CausalStorageTest.ring(), "node1");
+            assertEquals(published ? 1 : 0, store.siblings("test", new byte[] {1}).size());
+            if (published) assertEquals(1, store.vector(id).get("node1"));
+            try (var next =
+                store.beginCausal(
+                    "test",
+                    new byte[] {1},
+                    0,
+                    ObjectStorage.sha256(new byte[0]),
+                    io.quorumfs.versioning.VectorClock.empty())) {
+              assertEquals(2, store.vector(next.commit().id()).get("node1"));
+            }
+          } else assertEquals(2, ObjectStorageTest.put(store, new byte[0]).sequence());
         }
         System.out.println(
-            "PASS process boundary=" + mode + " published=" + published + " seed=20260930");
+            "PASS process causal="
+                + causal
+                + " boundary="
+                + mode
+                + " published="
+                + published
+                + " seed=20260930");
       } finally {
         if (process.isAlive()) {
           process.destroyForcibly();

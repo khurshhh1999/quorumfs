@@ -3,7 +3,7 @@
 ## Objective and boundaries
 Build a five-node leaderless object store using Java, gRPC, RocksDB and Docker, with consistent hashing, chunked streaming, version vectors, configurable strict quorums, hinted handoff, read repair, Merkle anti-entropy, checksums, tombstones and fail-closed behavior. Validate with a reproducible campaign of at least 10,000 operations.
 
-Phase 1 / Q0 is merged in PR #1. Phase 2 / Q1 implements durable local storage and passes local validation; owner commit/push and remote CI are pending. Q2–Q8 remain pending. `implementation.md` is the detailed design; `delivery.md` supplies CI/CD and owner-run Git/PR rules. No POSIX filesystem, S3 compatibility, dynamic membership, linearizability, or multi-region promise is in v1 scope.
+Phase 1 / Q0 and Phase 2 / Q1 are merged in PRs #1 and #2. Phase 3 / Q2 implements fixed ownership and durable causal versions on `pr-3`; local evidence is in `docs/evidence/Q2/README.md`. Owner publication and remote CI remain pending. Q3–Q8 remain pending. `implementation.md` is the detailed design; `delivery.md` supplies CI/CD and owner-run Git/PR rules. No POSIX filesystem, S3 compatibility, dynamic membership, linearizability, or multi-region promise is in v1 scope.
 
 ## Ordered milestones and PR slices
 
@@ -25,10 +25,10 @@ Evidence: `docs/evidence/Q1/README.md`. Local immutable versions and offline CLI
 Acceptance: acknowledged object survives restart; crashes before commit expose no partial object; missing/corrupt chunks are never served as valid; memory usage bounded by stream concurrency rather than full object size.
 
 ### Q2 - Ring and causal versions (depends Q1)
-- [ ] Consistent hash ring with distinct physical owners, virtual nodes, stable epoch/config validation and deterministic serialization.
-- [ ] Vector dominance/equality/concurrency, durable increments, sibling handling and explicit resolution.
-- [ ] Property tests for ring determinism, replica uniqueness, vector algebra and convergence independent of merge order.
-Acceptance: five nodes compute identical owners; invalid/unequal epochs fail closed; incomparable writes remain visible; counter identity survives restart. Suggested PRs: hashing; causal versions.
+- [x] Consistent hash ring with distinct physical owners, virtual nodes, stable epoch/config validation and deterministic serialization.
+- [x] Vector dominance/equality/concurrency, durable increments, sibling handling and explicit resolution.
+- [x] Property tests for ring determinism, replica uniqueness, vector algebra and convergence independent of merge order.
+Acceptance: five nodes compute identical owners; invalid/unequal epochs fail closed; incomparable writes remain visible; counter identity survives restart. Evidence: `docs/evidence/Q2/README.md`. One owner-requested PR 3 contains hashing and causal versions; distributed RPCs remain unimplemented.
 
 ### Q3 - Quorum coordinator (depends Q2)
 - [ ] Replication/read RPCs with deadlines, canonical-owner response counting and complete durable write acknowledgments.
@@ -90,10 +90,11 @@ Create `docs/evidence/Qx/` containing command/results, environment, seed, histor
 | Milestone | Status | PR | Evidence |
 | --- | --- | --- | --- |
 | Q0 / Phase 1 | Merged | #1 | `docs/evidence/Q0/README.md` |
-| Q1 / Phase 2 | Locally verified; owner handoff and remote CI pending | Not created | `docs/evidence/Q1/README.md` |
-| Q2–Q8 | Not started | None | None |
+| Q1 / Phase 2 | Merged | #2 | `docs/evidence/Q1/README.md` |
+| Q2 / Phase 3 | Locally verified; owner publication and remote CI pending | Not created | `docs/evidence/Q2/README.md` |
+| Q3–Q8 | Not started | None | None |
 
-The clean-build evidence is a source-only copy, not a Git checkout, because dedicated repository initialization is owner-controlled. Do not backfill results from source text or infer that local process crashes validate hardware power-loss durability.
+The clean-build evidence is a source-only copy, not a Git checkout, so uncommitted source changes can be verified without committing on the owner’s behalf. Do not backfill results from source text or infer that local process crashes validate hardware power-loss durability.
 
 ## Definition of done
 All source features work together on five nodes; contracts specify causal conflicts and uncertain outcomes; strict quorums and durable acknowledgments are verified; healing converges without data resurrection; the 10,000-operation campaign has inspectable evidence; CI/CD and recovery instructions work; README is truthful and customer-facing; and the user controls the final Git and release actions.
