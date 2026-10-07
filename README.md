@@ -1,102 +1,107 @@
 # QuorumFS
 
-QuorumFS is a developer-preview foundation for a distributed object store with
-configurable replica and quorum settings. The current build runs five gRPC nodes,
-validates fixed membership, and provides a durable local RocksDB storage engine
-with offline upload, verified download, and checkpoint/restore commands.
-It also computes fixed ring ownership and stores causal versions with explicit
-conflict resolution.
-**Distributed object RPCs remain unimplemented** and return `UNIMPLEMENTED`.
+QuorumFS is a developer-preview distributed object store with five fixed nodes,
+consistent hashing, durable RocksDB storage and configurable strict read/write
+quorums. It supports authenticated local-development uploads, verified downloads,
+causal sibling inspection and explicit conflict resolution. Deletion and automatic
+replica repair are not implemented yet.
 
 ## Run locally
 
-Requires JDK 21, Python 3, and Docker with Compose. Set `JAVA_HOME` to your JDK 21
-installation. The build uses the checked-in, checksum-verified Gradle wrapper.
+Requires JDK 21, Python 3 and Docker with Compose. Set `JAVA_HOME` to JDK 21.
+The checked-in Gradle wrapper verifies pinned build dependencies.
 
 ```bash
 ./gradlew check assemble faultTest
 ./gradlew :server:installDist :client:installDist
+export QUORUMFS_CLIENT_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
+export QUORUMFS_PEER_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
+export QUORUMFS_NAMESPACES=demo
 docker compose -f infra/compose/compose.yaml up --build --wait --wait-timeout 180
-./gradlew smokeTest
-modules/client/build/install/client/bin/client info localhost:19001 --insecure
+client=modules/client/build/install/client/bin/client
+"$client" info localhost:19001 --insecure
 ```
 
-The info command reports `node1 quorumfs-dev 1 5 3 2 2 false`: node ID, cluster ID,
-epoch, member count, replication factor, read quorum, write quorum, and object-API
-readiness. All five nodes must have distinct IDs. Ports 19001–19005 reach the nodes
-through the local fault proxy. Port 18474 is the proxy administration endpoint.
-Published ports bind to loopback only.
+Info reports node ID, cluster ID, epoch, member count, N/R/W and object readiness.
+The final field is `true` with valid credentials. Without all three environment
+settings, the server retains inspection-only bootstrap mode; partial credential
+configuration fails startup. Credentials are separate for public and peer calls.
+Client access is restricted to the namespace allowlist.
+
+Ports 19001–19005 reach the nodes through the fault proxy. Port 18474 is its
+administration endpoint. Published ports bind to loopback. Transport remains
+plaintext with explicit development opt-in; keep this fixture on a trusted local
+machine. mTLS and individual client policies are not implemented yet.
+
+## Upload, download and resolve
 
 ```bash
-modules/client/build/install/client/bin/client health localhost:19001 --insecure
+work=$(mktemp -d)
+key=$(python3 -c 'import uuid; print(uuid.uuid4())')
+printf 'hello quorumfs\n' > "$work/input.txt"
+"$client" put localhost:19001 --insecure demo "$key" "$work/input.txt"
+"$client" head localhost:19002 --insecure demo "$key"
+"$client" get localhost:19003 --insecure demo "$key" "$work/output.txt"
+cmp "$work/input.txt" "$work/output.txt"
+context=$("$client" context localhost:19002 --insecure demo "$key")
+printf 'chosen replacement\n' > "$work/chosen.txt"
+"$client" resolve localhost:19004 --insecure demo "$key" "$work/chosen.txt" "$context"
+"$client" head localhost:19005 --insecure demo "$key"
+```
+
+Metadata lines contain UUID, size, SHA-256 and causal-context hex. A successful
+write additionally prints its durable owner count. `put` accepts an optional
+context argument for causal updates. A context-free write can create concurrent
+siblings. `get` reports a conflict when several visible versions remain; use
+`head` and append a chosen UUID to `get`, or explicitly resolve observed context.
+A racing unobserved version may remain a sibling. Existing output paths are
+never overwritten, and downloads are published only after checksum verification.
+
+Default N=3/R=2/W=2. Success requires W complete durable canonical owners;
+reads require R valid owner replies. Coordinator staging and non-owner copies
+never count. Timeouts can have an **unknown write outcome**: inspect state and
+context before retrying. Quorum overlap does not imply linearizability or
+exactly-once requests. See the [quorum runbook](docs/runbooks/quorum.md).
+
+```bash
+"$client" health localhost:19001 --insecure
 docker compose -f infra/compose/compose.yaml down
 ```
 
-Stopping Compose preserves each node's independent named volume. Restarting with
-the same configuration preserves its identity. `health` means the bootstrap
-process and identity database are available; it does not mean object operations
-are ready. The object service's named health check remains `NOT_SERVING`.
+Stopping preserves volumes. Health/readiness describe local service startup;
+quorum availability is checked per operation. A returning stale replica does
+not catch up automatically yet: hinted handoff, read repair and anti-entropy are
+still absent. Delete RPCs remain `UNIMPLEMENTED`.
 
-## Local object storage
+## Local storage and configuration
 
-Stop a node before using its offline storage tool. For a fresh demo directory:
+The offline tool supports local put/get/verify/checkpoint/restore plus ring and
+causal-version inspection. Stop the node before opening its data directory.
+See [storage and backups](docs/runbooks/storage.md) and the
+[offline causal walkthrough](docs/runbooks/causal-versions.md).
 
-```bash
-./gradlew :server:installDist
-mkdir -p build/local
-sed 's|data.dir=/var/lib/quorumfs|data.dir=build/local/data|' \
-  infra/compose/nodes/node1.properties > build/local/node1.properties
-printf 'hello quorumfs\n' > build/local/input.txt
-version=$(modules/server/build/install/server/bin/server storage \
-  build/local/node1.properties put demo greeting build/local/input.txt | awk '{print $1}')
-modules/server/build/install/server/bin/server storage \
-  build/local/node1.properties get demo greeting "$version" build/local/output.txt
-cmp build/local/input.txt build/local/output.txt
-modules/server/build/install/server/bin/server storage build/local/node1.properties verify
-```
+Exactly five unique fixed members are required. Quorums must satisfy
+`1 <= R,W <= N <= 5` and `R + W > N`. Reusing a volume with changed cluster ID,
+epoch, node ID, membership or quorum fails startup. Never erase identity to
+bypass this check. All nodes must use the same configuration and compatible
+binary before enabling data RPCs. Back up before upgrading; do not originate
+writes from stale checkpoints or run two copies of one node identity.
 
-The tool returns an immutable version UUID, local sequence and size after durable
-local publication. Reads require that UUID; this is not a replicated quorum
-acknowledgment. Output files must not already exist. Maximum object size is
-64 MiB; the library streams 256 KiB chunks and accepts up to eight active uploads
-by default. Interrupted uploads remain invisible. Restart verifies committed
-content and removes unfinished staging data. Corruption fails closed.
-
-See [local storage and backup/restore](docs/runbooks/storage.md) for commands,
-error handling, limits and upgrade/rollback instructions.
-
-## Causal versions and ownership
-
-The offline tool supports `owners`, `put-causal`, `siblings` and `resolve`.
-Ownership uses 128 virtual nodes per physical node and returns distinct owners.
-Causal writes preserve concurrent siblings; resolving explicitly observed
-versions publishes selected content with their merged context. Ring identity,
-counters and causal metadata survive restart. See the tested
-[causal-version walkthrough](docs/runbooks/causal-versions.md).
-
-Existing local-only keys remain readable. Use a separate key or namespace for
-causal writes. Back up before upgrading: older binaries cannot open the new
-column-family layout. Do not originate causal writes from a stale checkpoint or
-run two restored copies with the same node identity.
-
-## Configuration and limits
-
-Node files live in `infra/compose/nodes/`. Exactly five unique members are required.
-Defaults are N=3, R=2, W=2; configuration must satisfy `1 <= R,W <= N <= 5` and
-`R + W > N`. Changing a persisted cluster ID, epoch, node ID, membership or quorum
-configuration causes startup to fail. Do not erase a volume to bypass this check.
-
-Transport is plaintext and requires explicit development-mode opt-in. Do not expose
-this preview to untrusted networks. Local versions use synchronous WAL publication and verified chunks. There is no
-authentication, network replication or repair yet. This is an object-store project,
-not a mounted filesystem, POSIX implementation or S3-compatible endpoint.
+Objects are at most 64 MiB, streamed in 256 KiB chunks. Each node admits eight
+public and eight replica operations, with at most 32 visible siblings per key.
+Temporary disk staging can use up to 1 GiB plus native upload staging and retained
+object history. The client defaults to a 10-second deadline, server uploads to a
+15-second maximum, and individual peer RPCs to 3 seconds. Slow transfers can time
+out. There is no throughput or hardware power-loss claim.
 
 ## Troubleshooting and support
 
-Use `docker compose -f infra/compose/compose.yaml logs` for startup errors. Check
-`JAVA_HOME` if the build cannot find JDK 21. A RocksDB lock error means another
-process is using the same data directory. A persisted-identity error requires
-restoring the original configuration. See [development recovery guidance](docs/runbooks/development.md).
+Use Compose logs for startup errors. Check `JAVA_HOME` if JDK 21 cannot be found.
+A RocksDB lock error means another process is using the data directory. Restore
+the original configuration for identity errors; verify credentials and namespace
+permissions for access errors. Preserve corrupt volumes and restore only a
+verified compatible checkpoint. See the [development runbook](docs/runbooks/development.md).
 
-Report reproducible issues with runtime versions and sanitized startup logs.
+Report reproducible issues with runtime versions and sanitized logs. This is an
+object store, not a mounted filesystem, POSIX implementation or S3 endpoint.
 Production deployment and support are not available.

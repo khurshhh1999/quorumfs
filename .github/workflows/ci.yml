@@ -84,6 +84,7 @@ jobs:
       - run: python3 tests/system/storage_disk_full.py
       - run: docker compose -f infra/compose/compose.yaml up --build --wait --wait-timeout 180
       - run: ./gradlew smokeTest && python3 tests/system/proxy_fault.py
+      - run: python3 tests/system/quorum_compose.py
       - if: always()
         run: |
           mkdir -p build/reports/compose

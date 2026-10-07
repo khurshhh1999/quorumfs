@@ -1,6 +1,6 @@
 apply plugin: 'application'
 dependencies {
-    implementation project(':protocol')
+    api project(':protocol')
     implementation 'io.grpc:grpc-netty-shaded:1.84.0'
     implementation 'io.grpc:grpc-services:1.84.0'
 }

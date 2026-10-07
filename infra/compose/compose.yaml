@@ -10,6 +10,9 @@ x-node: &node
   tmpfs:
     - /tmp:size=128m,mode=1777,exec
   environment:
+    QUORUMFS_CLIENT_TOKEN: "${QUORUMFS_CLIENT_TOKEN:-}"
+    QUORUMFS_PEER_TOKEN: "${QUORUMFS_PEER_TOKEN:-}"
+    QUORUMFS_NAMESPACES: "${QUORUMFS_NAMESPACES:-}"
     JAVA_OPTS: "-Xms32m -Xmx128m -XX:MaxDirectMemorySize=64m -XX:ActiveProcessorCount=2"
   mem_limit: 384m
   cpus: 1.0

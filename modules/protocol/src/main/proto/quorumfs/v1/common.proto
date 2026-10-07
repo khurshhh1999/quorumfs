@@ -5,7 +5,7 @@ option java_multiple_files = true;
 
 message ObjectKey { string namespace = 1; bytes key = 2; }
 message VersionVector { map<string, uint64> counters = 1; }
-message ClusterIdentity { string cluster_id = 1; uint64 epoch = 2; }
+message ClusterIdentity { string cluster_id = 1; uint64 epoch = 2; bytes ring_configuration = 3; }
 message VersionMetadata {
   string version_id = 1;
   VersionVector vector = 2;

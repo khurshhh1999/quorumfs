@@ -263,6 +263,18 @@ public final class ObjectStorage implements AutoCloseable {
   private Upload beginVersion(
       String namespace, byte[] key, long size, byte[] sha256, VectorClock context, boolean replica)
       throws IOException {
+    return beginVersion(namespace, key, size, sha256, context, replica, UUID.randomUUID());
+  }
+
+  private Upload beginVersion(
+      String namespace,
+      byte[] key,
+      long size,
+      byte[] sha256,
+      VectorClock context,
+      boolean replica,
+      UUID id)
+      throws IOException {
     open();
     expire();
     objectKey(namespace, key);
@@ -277,8 +289,9 @@ public final class ObjectStorage implements AutoCloseable {
       throw new StorageException(INVALID, "Invalid size or SHA-256");
     if (uploads.size() >= limits.maxUploads())
       throw new StorageException(CAPACITY, "Upload capacity exhausted");
-    UUID id = UUID.randomUUID();
     try {
+      if (uploads.containsKey(id) || db.get(cf("requests"), StorageKeys.id(id)) != null)
+        throw new StorageException(INVALID, "Version ID is already in use");
       long sequence = allocate(context == null ? 0 : context.get(node));
       Upload upload =
           new Upload(
@@ -341,6 +354,34 @@ public final class ObjectStorage implements AutoCloseable {
     if (ring == null) throw new StorageException(INVALID, "Ring not configured");
     ring.requireCompatible(peer);
     return beginVersion(namespace, key, size, sha256, Objects.requireNonNull(vector), true);
+  }
+
+  /** Persist a coordinator event without publishing a non-owner object copy. */
+  public synchronized VectorClock allocateVector(VectorClock context) throws IOException {
+    open();
+    if (ring == null) throw new StorageException(INVALID, "Ring not configured");
+    context.requireMembers(ring.nodeIds());
+    try {
+      return context.with(node, allocate(context.get(node)));
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  /** Network replicas preserve the coordinator-assigned immutable UUID. */
+  public synchronized Upload beginReplica(
+      String namespace,
+      byte[] key,
+      long size,
+      byte[] sha256,
+      VectorClock vector,
+      HashRing peer,
+      UUID id)
+      throws IOException {
+    open();
+    if (ring == null) throw new StorageException(INVALID, "Ring not configured");
+    ring.requireCompatible(peer);
+    return beginVersion(namespace, key, size, sha256, Objects.requireNonNull(vector), true, id);
   }
 
   /** Resolve precisely the observed contexts; a concurrent unobserved sibling remains visible. */
