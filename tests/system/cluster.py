@@ -34,14 +34,15 @@ def ready(port, process=None):
     raise RuntimeError("Health deadline exceeded")
 
 
-def verify(ports):
+def verify(ports, enabled=False):
     identities = []
     for port in ports:
         ready(port)
         fields = client("info", port).stdout.strip().split()
-        assert fields[1:] == ["quorumfs-dev", "1", "5", "3", "2", "2", "false"], fields
+        assert fields[1:] == ["quorumfs-dev", "1", "5", "3", "2", "2", str(enabled).lower()], fields
         identities.append(fields[0])
-        assert client("assert-unimplemented", port).stdout.strip() == "UNIMPLEMENTED"
+        if not enabled:
+            assert client("assert-unimplemented", port).stdout.strip() == "UNIMPLEMENTED"
     assert sorted(identities) == [f"node{i}" for i in range(1, 6)], identities
     return identities
 
@@ -50,7 +51,7 @@ def run():
     if MODE == "smoke":
         ports = [int(p) for p in os.environ.get("QUORUMFS_PORTS", "19001,19002,19003,19004,19005").split(",")]
         assert len(ports) == 5
-        return {"nodes": verify(ports), "transport": "external-grpc"}
+        return {"nodes": verify(ports, bool(os.environ.get("QUORUMFS_CLIENT_TOKEN") and os.environ.get("QUORUMFS_PEER_TOKEN") and os.environ.get("QUORUMFS_NAMESPACES"))), "transport": "external-grpc"}
     assert MODE in ("integration", "fault")
     sockets = []
     for _ in range(5):
@@ -62,6 +63,8 @@ def run():
         s.close()
     processes = []
     handles = []
+    bootstrap_env = {k: v for k, v in os.environ.items() if k not in (
+        "QUORUMFS_CLIENT_TOKEN", "QUORUMFS_PEER_TOKEN", "QUORUMFS_NAMESPACES")}
     with tempfile.TemporaryDirectory(prefix="quorumfs-") as work:
         work = Path(work)
         configs = []
@@ -69,7 +72,7 @@ def run():
         def start(i):
             log = (RESULTS / f"node{i + 1}.log").open("a")
             handles.append(log)
-            process = subprocess.Popen([str(SERVER), str(configs[i])], stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(SERVER), str(configs[i])], stdout=log, stderr=subprocess.STDOUT, env=bootstrap_env)
             processes.append(process)
             ready(ports[i], process)
             return process
@@ -105,7 +108,7 @@ def run():
                     process.terminate()
                     process.wait(timeout=15)
             configs[0].write_text(configs[0].read_text().replace("cluster.epoch=1", "cluster.epoch=2"))
-            mismatch = subprocess.run([str(SERVER), str(configs[0])], capture_output=True, text=True, timeout=15)
+            mismatch = subprocess.run([str(SERVER), str(configs[0])], capture_output=True, text=True, timeout=15, env=bootstrap_env)
             assert mismatch.returncode != 0 and "Persisted node/cluster identity" in mismatch.stderr
             return {"nodes": identities, "transport": "real-grpc", "native_storage": "RocksDB",
                     "restart": "passed", "epoch_mismatch": "rejected", "process_kill": MODE == "fault"}

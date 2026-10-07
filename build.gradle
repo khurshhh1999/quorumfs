@@ -43,8 +43,12 @@ tasks.register('causalIntegrationTest', Exec) {
     dependsOn ':server:installDist'
     commandLine 'python3', 'tests/system/causal_cli.py'
 }
+tasks.register('quorumCliTest', Exec) {
+    dependsOn ':server:installDist', ':client:installDist'
+    commandLine 'python3', 'tests/system/quorum_cli.py'
+}
 tasks.register('integrationTest', Exec) {
-    dependsOn ':server:installDist', ':client:installDist', ':storage:test', 'storageIntegrationTest', 'causalIntegrationTest'
+    dependsOn ':server:installDist', ':client:installDist', ':storage:test', ':server:quorumIntegrationTest', 'storageIntegrationTest', 'causalIntegrationTest', 'quorumCliTest'
     commandLine 'python3', 'tests/system/cluster.py', 'integration'
 }
 tasks.register('faultTest', Exec) {

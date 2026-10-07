@@ -248,4 +248,30 @@ class CausalStorageTest {
       }
     }
   }
+
+  @Test
+  void coordinatorAllocationAndReplicaUuidSurviveRestartWithoutNonOwnerPublication()
+      throws Exception {
+    Path db = root.resolve("network");
+    UUID id = UUID.randomUUID();
+    VectorClock vector;
+    try (var store = store(db)) {
+      vector = store.allocateVector(VectorClock.of(Map.of("node1", 41L)));
+      assertEquals(42, vector.get("node1"));
+      assertEquals(0, store.verifyAll());
+    }
+    try (var store = store(db)) {
+      assertEquals(43, store.allocateVector(VectorClock.empty()).get("node1"));
+      try (var upload = store.beginReplica("ns", KEY, 0, EMPTY, vector, ring(), id)) {
+        assertEquals(id, upload.commit().id());
+      }
+      assertThrows(
+          StorageException.class,
+          () -> store.beginReplica("other", KEY, 0, EMPTY, vector, ring(), id));
+    }
+    try (var store = store(db)) {
+      assertEquals(vector, store.vector(id));
+      assertEquals(id, store.siblings("ns", KEY).getFirst().id());
+    }
+  }
 }

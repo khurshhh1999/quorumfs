@@ -2,7 +2,17 @@ apply plugin: 'application'
 dependencies {
     implementation project(':protocol')
     implementation project(':storage')
+    implementation project(':coordinator')
+    testImplementation project(':client')
     implementation 'io.grpc:grpc-netty-shaded:1.84.0'
     implementation 'io.grpc:grpc-services:1.84.0'
 }
 application { mainClass = 'io.quorumfs.server.ServerMain' }
+
+tasks.named('test') { useJUnitPlatform { excludeTags 'quorum-integration' } }
+tasks.register('quorumIntegrationTest', Test) {
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'quorum-integration' }
+    maxHeapSize = '384m'
+}
