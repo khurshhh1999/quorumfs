@@ -1,9 +1,10 @@
 # Versioned API contract
 
 `quorumfs.v1` defines public ObjectStore and internal ReplicaStore contracts.
-All data operations remain UNIMPLEMENTED in Q0; only GetClusterInfo and gRPC
-health checks are implemented. Contracts describe the intended API, not current
-storage capability.
+Authenticated development mode implements public put/get/head/resolve/delete and
+internal replicate/read/fetch/apply-tombstone/deliver-hint operations. Merkle and
+range exchange remain UNIMPLEMENTED. Without configured access credentials,
+only GetClusterInfo and health inspection are enabled.
 
 `v1/` contains the review baseline as `.proto` source files. Gradle compiles both the baseline and current schemas into ignored build directories for comparison. No generated descriptors are committed. The unit compatibility test
 requires existing files, packages, options, message/enum types, fields and RPC
@@ -17,8 +18,7 @@ The first stream frame is a header; subsequent frames are ordered chunks.
 Offsets and sizes use bytes. Digests are raw 32-byte SHA-256 values. Keys are
 opaque bytes scoped to a namespace. Missing required semantic fields, unsigned
 values exceeding supported limits, duplicate/conflicting chunks and empty
-streams must be rejected by the future storage implementation. These checks
-are not yet wired to RPC handlers. Maximum intended chunk/object/key sizes:
+streams are rejected by the RPC handlers. Maximum chunk/object/key sizes:
 256 KiB / 64 MiB / 1 KiB.
 
 GetObject emits a version header and verified chunks, or a conflict VersionSet.
@@ -41,5 +41,16 @@ Errors carry ErrorDetail in `quorumfs-error-bin` gRPC trailers:
 
 OUTCOME_UNKNOWN sets outcome_unknown=true. A transport timeout can lack trailers
 and must also be treated as an unknown write outcome. Request IDs are trace/replay
-identifiers, not an exactly-once guarantee. Never blindly retry a future timed-out
+identifiers, not an exactly-once guarantee. Never blindly retry a timed-out
 write without inspecting causal state.
+
+HEAD retains tombstone metadata and context. A tombstone has size zero and the
+SHA-256 of empty bytes. GET of a single or selected tombstone returns NOT_FOUND;
+multiple maximal heads return conflict metadata. Empty live versions are distinct
+from tombstones. ApplyTombstone requires the tombstone bit and canonical owner;
+DeliverHint uses identical verified publication and replay rules as ReplicateVersion.
+Both require peer authentication and exact full-ring identity. No hint counts as W.
+
+Durable delivery may complete a write after its caller times out. Hint capacity
+exhaustion occurs before dispatch and returns RESOURCE_EXHAUSTED. Request IDs do
+not provide global deduplication; a new public retry can create a new causal event.

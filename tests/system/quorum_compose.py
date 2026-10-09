@@ -41,8 +41,21 @@ with (OUT / 'compose.log').open('w') as log:
             assert len(client('head', 19004, 'demo', key).splitlines()) == 1
             client('get', 19005, 'demo', key, work / 'resolved')
             assert source.read_bytes() == (work / 'resolved').read_bytes()
+            context = client('context', 19001, 'demo', key)
+            deleted = client('delete', 19002, 'demo', key, context).splitlines()[0].split()
+            assert deleted[4] == 'tombstone'
+            assert client('head', 19003, 'demo', key).split()[4] == 'tombstone'
+            try:
+                client('get', 19004, 'demo', key, work / 'deleted')
+                raise AssertionError('Deleted object was downloadable')
+            except subprocess.CalledProcessError as error:
+                assert 'NOT_FOUND' in error.output
+            assert not (work / 'deleted').exists()
+            client('put', 19005, 'demo', key, source, deleted[3])
+            client('get', 19001, 'demo', key, work / 'recreated')
+            assert source.read_bytes() == (work / 'recreated').read_bytes()
         (OUT / 'result.json').write_text(json.dumps({'status':'passed','seed':20261007,'five_containers':True,
-            'authenticated_quorum_cli':True}, indent=2) + '\n')
+            'authenticated_quorum_cli':True, 'delete_recreate':True}, indent=2) + '\n')
         print('PASS five-container authenticated quorum CLI')
     finally:
         subprocess.run(COMPOSE + ['logs', '--no-color'], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=30)

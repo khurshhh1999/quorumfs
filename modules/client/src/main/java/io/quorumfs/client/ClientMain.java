@@ -14,7 +14,7 @@ public final class ClientMain {
 
   public static void main(String[] args) throws Exception {
     if (args.length >= 3
-        && java.util.Set.of("put", "get", "head", "resolve", "owners", "context")
+        && java.util.Set.of("put", "get", "head", "resolve", "owners", "context", "delete")
             .contains(args[0])) {
       object(args);
       return;
@@ -73,12 +73,13 @@ public final class ClientMain {
   private static void object(String[] args) throws Exception {
     if (!args[2].equals("--insecure") || args.length < 5)
       throw new IllegalArgumentException(
-          "Usage: client <put|resolve|get|head|owners|context> endpoint --insecure namespace key [file] [context-hex|version-id]");
+          "Usage: client <put|resolve|get|head|owners|context|delete> endpoint --insecure namespace key [file] [context-hex|version-id]");
     var key = ObjectClient.key(args[3], args[4]);
     int count = args.length;
     boolean valid =
         switch (args[0]) {
           case "head", "owners", "context" -> count == 5;
+          case "delete" -> count == 5 || count == 6;
           case "put", "get" -> count == 6 || count == 7;
           case "resolve" -> count == 7;
           default -> false;
@@ -128,6 +129,16 @@ public final class ClientMain {
         }
         case "get" ->
             print(client.get(key, count == 7 ? args[6] : "", java.nio.file.Path.of(args[5])));
+        case "delete" -> {
+          var context =
+              count == 5 || args[5].equals("-")
+                  ? io.quorumfs.versioning.VectorClock.empty()
+                  : io.quorumfs.versioning.VectorClock.deserialize(
+                      java.util.HexFormat.of().parseHex(args[5]));
+          var result = client.delete(key, context);
+          print(result.getVersion());
+          System.out.println("durable_owners=" + result.getDurableOwnerCount());
+        }
         case "put", "resolve" -> {
           var context =
               count == 6 || args[6].equals("-")
@@ -146,13 +157,14 @@ public final class ClientMain {
 
   private static void print(VersionMetadata version) {
     System.out.printf(
-        "%s %d %s %s%n",
+        "%s %d %s %s %s%n",
         version.getVersionId(),
         version.getSize(),
         java.util.HexFormat.of().formatHex(version.getSha256().toByteArray()),
         java.util.HexFormat.of()
             .formatHex(
                 io.quorumfs.versioning.VectorClock.of(version.getVector().getCountersMap())
-                    .serialize()));
+                    .serialize()),
+        version.getTombstone() ? "tombstone" : "live");
   }
 }

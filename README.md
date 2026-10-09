@@ -3,8 +3,8 @@
 QuorumFS is a developer-preview distributed object store with five fixed nodes,
 consistent hashing, durable RocksDB storage and configurable strict read/write
 quorums. It supports authenticated local-development uploads, verified downloads,
-causal sibling inspection and explicit conflict resolution. Deletion and automatic
-replica repair are not implemented yet.
+causal sibling inspection, explicit conflict resolution, causal deletion, durable
+hinted handoff and bounded read repair.
 
 ## Run locally
 
@@ -49,7 +49,8 @@ printf 'chosen replacement\n' > "$work/chosen.txt"
 "$client" head localhost:19005 --insecure demo "$key"
 ```
 
-Metadata lines contain UUID, size, SHA-256 and causal-context hex. A successful
+Metadata lines contain UUID, size, SHA-256, causal-context hex and `live` or
+`tombstone`. A successful
 write additionally prints its durable owner count. `put` accepts an optional
 context argument for causal updates. A context-free write can create concurrent
 siblings. `get` reports a conflict when several visible versions remain; use
@@ -63,15 +64,32 @@ never count. Timeouts can have an **unknown write outcome**: inspect state and
 context before retrying. Quorum overlap does not imply linearizability or
 exactly-once requests. See the [quorum runbook](docs/runbooks/quorum.md).
 
+Stopping preserves volumes. Health/readiness describe local service startup;
+quorum availability is checked per operation. Pending durable hints catch up a
+returning owner, and quorum reads trigger bounded repair. Anti-entropy is not
+implemented yet; unread divergence without surviving hints can remain.
+
+## Delete and recreate
+
+Before stopping the fixture, use observed context to delete:
+
+```bash
+context=$("$client" context localhost:19002 --insecure demo "$key")
+"$client" delete localhost:19001 --insecure demo "$key" "$context"
+"$client" head localhost:19003 --insecure demo "$key"
+context=$("$client" context localhost:19003 --insecure demo "$key")
+"$client" put localhost:19004 --insecure demo "$key" "$work/input.txt" "$context"
+```
+
+Deletion requires W durable canonical owners. HEAD preserves tombstone context;
+GET of a tombstone returns NOT_FOUND. A concurrent live write remains a conflict.
+Tombstones and historical bytes are retained indefinitely, so deletion is not
+secure erasure. See the [recovery runbook](docs/runbooks/recovery.md).
+
 ```bash
 "$client" health localhost:19001 --insecure
 docker compose -f infra/compose/compose.yaml down
 ```
-
-Stopping preserves volumes. Health/readiness describe local service startup;
-quorum availability is checked per operation. A returning stale replica does
-not catch up automatically yet: hinted handoff, read repair and anti-entropy are
-still absent. Delete RPCs remain `UNIMPLEMENTED`.
 
 ## Local storage and configuration
 
@@ -84,13 +102,16 @@ Exactly five unique fixed members are required. Quorums must satisfy
 `1 <= R,W <= N <= 5` and `R + W > N`. Reusing a volume with changed cluster ID,
 epoch, node ID, membership or quorum fails startup. Never erase identity to
 bypass this check. All nodes must use the same configuration and compatible
-binary before enabling data RPCs. Back up before upgrading; do not originate
+binary before enabling data RPCs. This binary upgrades the database format to 2; older binaries cannot reopen it.
+Upgrade all nodes together. Back up before upgrading; do not originate
 writes from stale checkpoints or run two copies of one node identity.
 
 Objects are at most 64 MiB, streamed in 256 KiB chunks. Each node admits eight
 public and eight replica operations, with at most 32 visible siblings per key.
 Temporary disk staging can use up to 1 GiB plus native upload staging and retained
-object history. The client defaults to a 10-second deadline, server uploads to a
+object history. Recovery adds at most 192 MiB of temporary transfers and a
+256 MiB/128-version durable hint budget per node. A full hint queue rejects new
+writes before dispatch. The client defaults to a 10-second deadline, server uploads to a
 15-second maximum, and individual peer RPCs to 3 seconds. Slow transfers can time
 out. There is no throughput or hardware power-loss claim.
 

@@ -58,7 +58,8 @@ with tempfile.TemporaryDirectory(prefix='quorumfs-quorum-') as work:
         source.write_bytes(b'phase-4-seed-20261007' * 20000)
         first = command(ports[0], 'put', 'demo', 'cli-key', source).splitlines()
         assert first[1] == 'durable_owners=2'
-        version, size, digest, context = first[0].split()
+        version, size, digest, context, kind = first[0].split()
+        assert kind == "live"
         output = work / 'download'
         command(ports[1], 'get', 'demo', 'cli-key', output)
         assert source.read_bytes() == output.read_bytes()
@@ -78,9 +79,31 @@ with tempfile.TemporaryDirectory(prefix='quorumfs-quorum-') as work:
         survivor = next(i for i in range(5) if i != victim)
         command(ports[survivor], 'get', 'demo', 'cli-key', work / 'after-kill')
         assert source.read_bytes() == (work / 'after-kill').read_bytes()
+        context = command(ports[survivor], 'context', 'demo', 'cli-key')
+        deleted = command(ports[survivor], 'delete', 'demo', 'cli-key', context).splitlines()[0].split()
+        assert deleted[4] == 'tombstone'
+        command(ports[survivor], 'get', 'demo', 'cli-key', work / 'deleted', success=False)
+        assert not (work / 'deleted').exists()
+        assert command(ports[survivor], 'head', 'demo', 'cli-key').split()[4] == 'tombstone'
+        # Restart the actual killed owner; durable handoff catches it up in the background.
+        processes[victim] = subprocess.Popen([str(SERVER), str(work / f'node{victim+1}.properties')],
+                                            env=env, stdout=logs[victim], stderr=subprocess.STDOUT)
+        until = time.monotonic() + 35
+        while True:
+            health = subprocess.run([str(CLIENT), 'health', f'localhost:{ports[victim]}', '--insecure'],
+                                    env=env, capture_output=True, timeout=10)
+            if health.returncode == 0:
+                break
+            assert time.monotonic() < until
+            time.sleep(.1)
+        # The Java TCP fixture verifies target-local catch-up without reads; this is the CLI contract.
+        assert command(ports[victim], 'head', 'demo', 'cli-key').split()[4] == 'tombstone'
+        command(ports[survivor], 'put', 'demo', 'cli-key', source, deleted[3])
+        command(ports[victim], 'get', 'demo', 'cli-key', work / 'recreated')
+        assert source.read_bytes() == (work / 'recreated').read_bytes()
         result = {'status': 'passed', 'seed': 20261007, 'five_jvms': True,
                   'authenticated_cli': True, 'quorum_put_get_resolve': True,
-                  'owner_process_kill': True, 'unauthorized_denied': True}
+                  'owner_process_kill': True, 'delete_restart_recreate': True, 'unauthorized_denied': True}
         (OUT / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result))
     finally:

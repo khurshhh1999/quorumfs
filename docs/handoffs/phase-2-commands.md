@@ -10,7 +10,7 @@ git branch --show-current
 git status --short
 git diff --check
 git diff
-git add -- .github/workflows/ci.yml Dockerfile README.md build.gradle delivery.md implementation.md plan.md modules/storage/build.gradle modules/storage/src modules/server/src/main/java/io/quorumfs/server/ServerMain.java modules/server/src/main/java/io/quorumfs/server/StorageMain.java tests/system/storage_cli.py tests/system/storage_disk_full.py docs/adr/0003-durable-local-storage.md docs/runbooks/storage.md docs/evidence/Q1/README.md docs/handoffs/phase-2-pr.md docs/handoffs/phase-2-commands.md
+git add -- .github/workflows/ci.yml Dockerfile README.md build.gradle modules/storage/build.gradle modules/storage/src modules/server/src/main/java/io/quorumfs/server/ServerMain.java modules/server/src/main/java/io/quorumfs/server/StorageMain.java tests/system/storage_cli.py tests/system/storage_disk_full.py docs/adr/0003-durable-local-storage.md docs/runbooks/storage.md docs/evidence/Q1/README.md docs/handoffs/phase-2-pr.md docs/handoffs/phase-2-commands.md
 git diff --cached --check
 git diff --cached --stat
 git diff --cached

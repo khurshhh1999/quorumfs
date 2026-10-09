@@ -37,6 +37,16 @@ public final class PeerClient implements AutoCloseable {
   }
 
   public ReplicaAck put(String node, ReplicaHeader header, Spool data, long end) throws Exception {
+    return transfer(node, header, data, end, false);
+  }
+
+  public ReplicaAck deliver(String node, ReplicaHeader header, Spool data, long end)
+      throws Exception {
+    return transfer(node, header, data, end, true);
+  }
+
+  private ReplicaAck transfer(String node, ReplicaHeader header, Spool data, long end, boolean hint)
+      throws Exception {
     try (InputStream input = data.input()) {
       var stub =
           ReplicaStoreGrpc.newStub(channel(node))
@@ -46,7 +56,7 @@ public final class PeerClient implements AutoCloseable {
                   TimeUnit.NANOSECONDS);
       ReplicaAck ack =
           Streams.upload(
-              stub::replicateVersion,
+              hint ? stub::deliverHint : stub::replicateVersion,
               new Streams.Source<ReplicaFrame>() {
                 private boolean first = true;
                 private long offset;

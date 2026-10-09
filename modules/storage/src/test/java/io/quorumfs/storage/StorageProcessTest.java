@@ -33,21 +33,26 @@ class StorageProcessTest {
 
   @Test
   void realProcessKillsBeforeAndAfterPublicationPreserveTheCommitBoundary() throws Exception {
-    boundaries(false);
+    boundaries(false, false);
   }
 
   @Test
   void causalMetadataAndHeadIndexShareTheCrashCommitBoundary() throws Exception {
-    boundaries(true);
+    boundaries(true, false);
   }
 
-  private void boundaries(boolean causal) throws Exception {
+  private void boundaries(boolean causal, boolean tombstone) throws Exception {
     for (String mode :
         new String[] {"STAGED", "WAL_SYNC", "MANIFEST_WRITE", "AFTER_MANIFEST", "ACKNOWLEDGED"}) {
       Path directory = root.resolve(mode),
           signal = root.resolve(mode + ".ready"),
           log = root.resolve(mode + ".log");
-      Process process = start(directory, causal ? "causal-" + mode : mode, signal, log);
+      Process process =
+          start(
+              directory,
+              tombstone ? "tombstone-" + mode : causal ? "causal-" + mode : mode,
+              signal,
+              log);
       try {
         long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
         while (!Files.exists(signal) && process.isAlive() && System.nanoTime() < deadline)
@@ -67,6 +72,8 @@ class StorageProcessTest {
                 StorageException.Code.NOT_FOUND,
                 assertThrows(StorageException.class, () -> store.head("test", new byte[] {1}, id))
                     .code());
+          if (published)
+            assertEquals(tombstone, store.head("test", new byte[] {1}, id).tombstone());
           if (causal) {
             store.configureRing(CausalStorageTest.ring(), "node1");
             assertEquals(published ? 1 : 0, store.siblings("test", new byte[] {1}).size());
@@ -78,7 +85,7 @@ class StorageProcessTest {
                     0,
                     ObjectStorage.sha256(new byte[0]),
                     io.quorumfs.versioning.VectorClock.empty())) {
-              assertEquals(2, store.vector(next.commit().id()).get("node1"));
+              assertEquals(tombstone ? 3 : 2, store.vector(next.commit().id()).get("node1"));
             }
           } else assertEquals(2, ObjectStorageTest.put(store, new byte[0]).sequence());
         }
@@ -107,6 +114,60 @@ class StorageProcessTest {
       assertTrue(process.waitFor(90, TimeUnit.SECONDS), "Bounded-memory child timed out");
       assertEquals(0, process.exitValue(), () -> read(log));
       assertTrue(read(log).contains("PASS bounded"), () -> read(log));
+      System.out.println(read(log));
+    } finally {
+      if (process.isAlive()) {
+        process.destroyForcibly();
+        process.waitFor(10, TimeUnit.SECONDS);
+      }
+    }
+  }
+
+  @Test
+  void tombstoneRepairSharesAtomicCrashPublicationBoundary() throws Exception {
+    boundaries(true, true);
+  }
+
+  @Test
+  void durableHintPublicationAndAcknowledgmentSurviveRealProcessKills() throws Exception {
+    for (String mode :
+        new String[] {"HINT_PUBLISH", "HINT_DURABLE", "HINT_ACK", "HINT_ACKNOWLEDGED"}) {
+      Path database = root.resolve(mode),
+          signal = root.resolve(mode + ".ready"),
+          log = root.resolve(mode + ".log");
+      Process process = start(database, mode, signal, log);
+      try {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (!Files.exists(signal) && process.isAlive() && System.nanoTime() < deadline)
+          Thread.sleep(20);
+        assertTrue(Files.exists(signal), () -> read(log));
+        process.destroyForcibly();
+        assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+        try (var store = new ObjectStorage(database, "process-fixture")) {
+          boolean pending = mode.equals("HINT_DURABLE") || mode.equals("HINT_ACK");
+          assertEquals(pending ? 1 : 0, store.hints().size(), mode);
+          assertEquals(0, store.verifyAll());
+          if (pending)
+            store.readHint(store.hints().getFirst().id(), OutputStream.nullOutputStream());
+        }
+      } finally {
+        if (process.isAlive()) {
+          process.destroyForcibly();
+          process.waitFor(10, TimeUnit.SECONDS);
+        }
+      }
+    }
+  }
+
+  @Test
+  void maximumHintPayloadAndByteBudgetWorkWithTwentyFourMiBHeap() throws Exception {
+    Path log = root.resolve("hint-bounded.log");
+    Process process =
+        start(root.resolve("hint-bounded"), "HINT_BOUNDED", root.resolve("hint.ready"), log);
+    try {
+      assertTrue(process.waitFor(90, TimeUnit.SECONDS), "Hint memory fixture timed out");
+      assertEquals(0, process.exitValue(), () -> read(log));
+      assertTrue(read(log).contains("PASS HINT_BOUNDED"), () -> read(log));
       System.out.println(read(log));
     } finally {
       if (process.isAlive()) {

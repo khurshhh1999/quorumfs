@@ -35,3 +35,11 @@ __pycache__/
 /docs/evidence/**/*.html
 /docs/evidence/**/*.png
 /docs/handoffs/phase-1-files.md
+
+# Local-only planning documents: never stage or commit.
+/plan.md
+/implementation.md
+/delivery.md
+
+# Local agent instructions (removed from the remote by the owner).
+/AGENTS.md

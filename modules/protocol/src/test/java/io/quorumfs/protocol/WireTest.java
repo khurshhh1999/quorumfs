@@ -80,4 +80,31 @@ class WireTest {
                             ring())))
             .getCode());
   }
+
+  @Test
+  void tombstonesAreValidatedAndCannotAliasAnEmptyLiveVersion() {
+    var live =
+        VersionMetadata.newBuilder()
+            .setVersionId(UUID.randomUUID().toString())
+            .setVector(VersionVector.newBuilder().putCounters("node1", 1))
+            .setSha256(Wire.hash(new byte[0]))
+            .build();
+    var tombstone =
+        live.toBuilder().setVersionId(UUID.randomUUID().toString()).setTombstone(true).build();
+    Wire.version(tombstone, ring());
+    assertEquals(
+        Status.Code.DATA_LOSS,
+        Status.fromThrowable(
+                assertThrows(
+                    RuntimeException.class, () -> Wire.merge(List.of(live, tombstone), ring())))
+            .getCode());
+    assertThrows(
+        RuntimeException.class,
+        () -> Wire.version(tombstone.toBuilder().setSize(1).build(), ring()));
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            Wire.version(
+                tombstone.toBuilder().setSha256(Wire.hash(new byte[] {1})).build(), ring()));
+  }
 }

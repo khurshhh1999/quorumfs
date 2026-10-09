@@ -501,7 +501,7 @@ class QuorumIntegrationTest {
               .setRequestId("replay")
               .build();
       assertTrue(
-          peer.put(owner, header, data, System.nanoTime() + TimeUnit.SECONDS.toNanos(5))
+          peer.deliver(owner, header, data, System.nanoTime() + TimeUnit.SECONDS.toNanos(5))
               .getDurable());
       assertEquals(
           sequence,
@@ -532,6 +532,293 @@ class QuorumIntegrationTest {
     try (var client = cluster.client("node4")) {
       assertEquals(
           Status.Code.DATA_LOSS, status(assertThrows(Exception.class, () -> client.head(key()))));
+    }
+  }
+
+  private void eventually(Callable<Boolean> condition) throws Exception {
+    long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
+    while (!condition.call()) {
+      if (System.nanoTime() > end) fail("Recovery did not converge within 25 seconds");
+      Thread.sleep(50);
+    }
+  }
+
+  @Test
+  void offlineOwnerReceivesDurableDeleteAfterCoordinatorRestartWithoutForegroundRead()
+      throws Exception {
+    var owners = cluster.owners(key());
+    String coordinator =
+        cluster.ids.stream().filter(n -> !owners.contains(n)).findFirst().orElseThrow();
+    var original = put(coordinator, key(), payload("deleted", 101), VectorClock.empty());
+    eventually(
+        () ->
+            owners.stream()
+                .allMatch(
+                    n -> {
+                      try {
+                        return !cluster
+                            .nodes
+                            .get(n)
+                            .store
+                            .siblings("demo", key().getKey().toByteArray())
+                            .isEmpty();
+                      } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                      }
+                    }));
+    String offline = owners.get(2);
+    cluster.disconnect(offline);
+    VersionMetadata tombstone;
+    try (var client = cluster.client(coordinator)) {
+      var deleted =
+          client.delete(key(), Wire.vector(original.getVersion().getVector(), cluster.ring()));
+      assertEquals(2, deleted.getDurableOwnerCount());
+      tombstone = deleted.getVersion();
+      assertTrue(tombstone.getTombstone());
+      assertEquals(
+          Status.Code.NOT_FOUND,
+          status(
+              assertThrows(
+                  Exception.class, () -> client.get(key(), "", root.resolve("deleted-output")))));
+      assertFalse(Files.exists(root.resolve("deleted-output")));
+      assertTrue(client.head(key()).getFirst().getTombstone());
+    }
+    assertTrue(
+        cluster.nodes.get(coordinator).store.hints().stream()
+            .anyMatch(
+                h ->
+                    h.id().toString().equals(tombstone.getVersionId())
+                        && h.destinations().contains(offline)));
+    cluster.restart(coordinator);
+    cluster.heal();
+    eventually(
+        () ->
+            cluster.nodes.get(offline).store.siblings("demo", key().getKey().toByteArray()).stream()
+                .allMatch(
+                    e -> e.id().toString().equals(tombstone.getVersionId()) && e.tombstone()));
+    eventually(() -> cluster.nodes.get(coordinator).store.hints().isEmpty());
+    cluster.restart(offline);
+    assertTrue(
+        cluster
+            .nodes
+            .get(offline)
+            .store
+            .head("demo", key().getKey().toByteArray(), Wire.uuid(tombstone.getVersionId()))
+            .tombstone());
+    try (var client = cluster.client(coordinator)) {
+      var recreated =
+          client.put(
+              key(),
+              payload("recreated", 1),
+              Wire.vector(tombstone.getVector(), cluster.ring()),
+              false);
+      assertFalse(recreated.getVersion().getTombstone());
+      assertEquals(recreated.getVersion(), client.get(key(), "", root.resolve("recreated-output")));
+    }
+  }
+
+  @Test
+  void concurrentDeleteAndWriteRemainConflictAndObservedContextCanResolve() throws Exception {
+    var original = put("node1", key(), payload("base-delete", 1), VectorClock.empty());
+    var context = Wire.vector(original.getVersion().getVector(), cluster.ring());
+    VersionMetadata deleted;
+    try (var client = cluster.client("node2")) {
+      deleted = client.delete(key(), context).getVersion();
+    }
+    var live = put("node3", key(), payload("concurrent-live", 2), context).getVersion();
+    try (var client = cluster.client("node4")) {
+      var versions = client.head(key());
+      assertEquals(Set.of(deleted, live), Set.copyOf(versions));
+      assertEquals(
+          Status.Code.ABORTED,
+          status(
+              assertThrows(
+                  Exception.class, () -> client.get(key(), "", root.resolve("mixed-conflict")))));
+      assertEquals(
+          Status.Code.NOT_FOUND,
+          status(
+              assertThrows(
+                  Exception.class,
+                  () ->
+                      client.get(key(), deleted.getVersionId(), root.resolve("selected-delete")))));
+      assertEquals(live, client.get(key(), live.getVersionId(), root.resolve("selected-live")));
+      var merged =
+          Wire.vector(deleted.getVector(), cluster.ring())
+              .merge(Wire.vector(live.getVector(), cluster.ring()));
+      var resolved = client.delete(key(), merged).getVersion();
+      assertEquals(List.of(resolved), client.head(key()));
+    }
+  }
+
+  @Test
+  void readRepairCapturesMissingVersionsAndPreservesConcurrentSibling() throws Exception {
+    var owners = cluster.owners(key());
+    var vectorA = VectorClock.of(Map.of("node1", 50L));
+    var vectorB = VectorClock.of(Map.of("node2", 50L));
+    UUID live = UUID.randomUUID(), deleted = UUID.randomUUID();
+    // Seed divergence directly, deliberately without hints; one live sibling and one tombstone.
+    for (String node : owners.subList(0, 2)) {
+      try (var upload =
+          cluster
+              .nodes
+              .get(node)
+              .store
+              .beginReplica(
+                  "demo",
+                  key().getKey().toByteArray(),
+                  0,
+                  Wire.hash(new byte[0]).toByteArray(),
+                  vectorA,
+                  cluster.ring(),
+                  live,
+                  false)) {
+        upload.commit();
+      }
+      try (var upload =
+          cluster
+              .nodes
+              .get(node)
+              .store
+              .beginReplica(
+                  "demo",
+                  key().getKey().toByteArray(),
+                  0,
+                  Wire.hash(new byte[0]).toByteArray(),
+                  vectorB,
+                  cluster.ring(),
+                  deleted,
+                  true)) {
+        upload.commit();
+      }
+    }
+    cluster.disconnect(owners.get(2));
+    String coordinator =
+        cluster.ids.stream().filter(n -> !owners.contains(n)).findFirst().orElseThrow();
+    try (var client = cluster.client(coordinator)) {
+      assertEquals(2, client.head(key()).size());
+    }
+    eventually(() -> cluster.nodes.get(coordinator).store.hints().size() == 2);
+    cluster.restart(coordinator); // Restart after durable capture, before target can accept repair.
+    cluster.heal();
+    eventually(
+        () ->
+            cluster
+                    .nodes
+                    .get(owners.get(2))
+                    .store
+                    .siblings("demo", key().getKey().toByteArray())
+                    .size()
+                == 2);
+    var repaired =
+        cluster.nodes.get(owners.get(2)).store.siblings("demo", key().getKey().toByteArray());
+    assertEquals(Set.of(live, deleted), Set.copyOf(repaired.stream().map(e -> e.id()).toList()));
+    assertEquals(1, repaired.stream().filter(e -> e.tombstone()).count());
+    cluster.restart(owners.get(2));
+    assertEquals(2, cluster.nodes.get(owners.get(2)).store.verifyAll());
+  }
+
+  @Test
+  void exhaustedHintBudgetRejectsWriteBeforeOwnerPublication() throws Exception {
+    var owners = cluster.owners(key());
+    String offline = owners.get(2);
+    cluster.disconnect(offline);
+    var store = cluster.nodes.get("node4").store;
+    synchronized (store) {
+      for (int i = 0; i < ObjectStorage.MAX_HINTS; i++) {
+        UUID id = UUID.randomUUID();
+        var version =
+            VersionMetadata.newBuilder()
+                .setVersionId(id.toString())
+                .setVector(Wire.vector(VectorClock.of(Map.of("node5", 1000L + i))))
+                .setSha256(Wire.hash(new byte[0]))
+                .setTombstone(true)
+                .build();
+        var header =
+            ReplicaHeader.newBuilder()
+                .setCluster(Wire.identity(cluster.ring()))
+                .setObject(key())
+                .setVersion(version)
+                .setRequestId(id.toString())
+                .build();
+        store.enqueueHint(
+            id,
+            header.toByteArray(),
+            List.of(offline),
+            0,
+            Wire.hash(new byte[0]).toByteArray(),
+            new ByteArrayInputStream(new byte[0]));
+      }
+    }
+    assertEquals(
+        Status.Code.RESOURCE_EXHAUSTED,
+        status(
+            assertThrows(
+                Exception.class,
+                () -> put("node4", key(), payload("capacity", 1), VectorClock.empty()))));
+    assertEquals(ObjectStorage.MAX_HINTS, store.hintStats().pendingVersions());
+    for (String node : owners)
+      assertTrue(
+          cluster.nodes.get(node).store.siblings("demo", key().getKey().toByteArray()).isEmpty());
+  }
+
+  @Test
+  void internalTombstoneReplayIsIdempotentAndRejectsLivePayload() throws Exception {
+    String owner = cluster.owners(key()).getFirst();
+    VersionMetadata version;
+    try (var client = cluster.client("node4")) {
+      version = client.delete(key(), VectorClock.empty()).getVersion();
+    }
+    var channel = cluster.direct(owner);
+    try {
+      Metadata token = new Metadata();
+      token.put(PeerClient.TOKEN, cluster.access.peerToken());
+      var stub =
+          ReplicaStoreGrpc.newBlockingStub(
+                  ClientInterceptors.intercept(
+                      channel, MetadataUtils.newAttachHeadersInterceptor(token)))
+              .withDeadlineAfter(5, TimeUnit.SECONDS);
+      var header =
+          ReplicaHeader.newBuilder()
+              .setCluster(Wire.identity(cluster.ring()))
+              .setObject(key())
+              .setVersion(version)
+              .setRequestId("tombstone-replay")
+              .build();
+      assertTrue(
+          stub.applyTombstone(TombstoneRequest.newBuilder().setHeader(header).build())
+              .getDurable());
+      long sequence =
+          cluster
+              .nodes
+              .get(owner)
+              .store
+              .head("demo", key().getKey().toByteArray(), Wire.uuid(version.getVersionId()))
+              .sequence();
+      assertTrue(
+          stub.applyTombstone(TombstoneRequest.newBuilder().setHeader(header).build())
+              .getDurable());
+      assertEquals(
+          sequence,
+          cluster
+              .nodes
+              .get(owner)
+              .store
+              .head("demo", key().getKey().toByteArray(), Wire.uuid(version.getVersionId()))
+              .sequence());
+      assertEquals(
+          Status.Code.INVALID_ARGUMENT,
+          status(
+              assertThrows(
+                  Exception.class,
+                  () ->
+                      stub.applyTombstone(
+                          TombstoneRequest.newBuilder()
+                              .setHeader(
+                                  header.toBuilder()
+                                      .setVersion(version.toBuilder().setTombstone(false)))
+                              .build()))));
+    } finally {
+      channel.shutdownNow();
     }
   }
 
