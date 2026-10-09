@@ -14,13 +14,11 @@ git add \
   .github/workflows/ci.yml \
   README.md \
   build.gradle \
-  delivery.md \
   docs/adr/0005-canonical-owner-quorums.md \
   docs/evidence/Q3/README.md \
   docs/handoffs/phase-4-commands.md \
   docs/handoffs/phase-4-pr.md \
   docs/runbooks/quorum.md \
-  implementation.md \
   infra/compose/compose.yaml \
   modules/client/build.gradle \
   modules/client/src/main/java/io/quorumfs/client/ClientMain.java \
@@ -47,7 +45,6 @@ git add \
   modules/server/src/test/java/io/quorumfs/server/QuorumIntegrationTest.java \
   modules/storage/src/main/java/io/quorumfs/storage/ObjectStorage.java \
   modules/storage/src/test/java/io/quorumfs/storage/CausalStorageTest.java \
-  plan.md \
   tests/system/cluster.py \
   tests/system/quorum_cli.py \
   tests/system/quorum_compose.py
@@ -86,13 +83,11 @@ git pull --ff-only origin main
 - `.github/workflows/ci.yml`
 - `README.md`
 - `build.gradle`
-- `delivery.md`
 - `docs/adr/0005-canonical-owner-quorums.md`
 - `docs/evidence/Q3/README.md`
 - `docs/handoffs/phase-4-commands.md`
 - `docs/handoffs/phase-4-pr.md`
 - `docs/runbooks/quorum.md`
-- `implementation.md`
 - `infra/compose/compose.yaml`
 - `modules/client/build.gradle`
 - `modules/client/src/main/java/io/quorumfs/client/ClientMain.java`
@@ -119,7 +114,6 @@ git pull --ff-only origin main
 - `modules/server/src/test/java/io/quorumfs/server/QuorumIntegrationTest.java`
 - `modules/storage/src/main/java/io/quorumfs/storage/ObjectStorage.java`
 - `modules/storage/src/test/java/io/quorumfs/storage/CausalStorageTest.java`
-- `plan.md`
 - `tests/system/cluster.py`
 - `tests/system/quorum_cli.py`
 - `tests/system/quorum_compose.py`

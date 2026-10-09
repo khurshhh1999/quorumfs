@@ -33,7 +33,8 @@ printf 'hello quorumfs\n' > "$work/input.txt"
 cmp "$work/input.txt" "$work/output.txt"
 ```
 
-Metadata lines contain UUID, size, SHA-256 hex and causal-context hex. A successful
+Metadata lines contain UUID, size, SHA-256 hex, causal-context hex and a
+`live`/`tombstone` kind. A successful
 write also prints `durable_owners=2` with default N=3/R=2/W=2. The coordinator may
 be any node, but only canonical owners count. Existing download paths are never
 overwritten. Downloads verify the entire payload before publishing the file.
@@ -64,7 +65,7 @@ quorum heads; use offline tools for historical UUIDs.
 - NOT_FOUND: obtained only after R valid owner responses, never a single miss.
 - ABORTED/conflict: inspect sibling metadata and explicitly select/resolve.
 - DATA_LOSS: metadata/content integrity failure; preserve the affected volume.
-- RESOURCE_EXHAUSTED: operation slots or sibling limits; resolve/retry after
+- RESOURCE_EXHAUSTED: operation slots, sibling limits or the durable hint budget; resolve/retry after
   capacity is available. Never delete an incomparable version to make space.
 - PERMISSION_DENIED: check client credential and allowed namespace. Peer and
   client credentials are not interchangeable.
@@ -83,7 +84,8 @@ Compose test creates ephemeral credentials and shuts its fixture down.
 
 Eight public and eight replica operations per node, 256 KiB chunks, 64 MiB objects,
 32 siblings and five fixed vector identities. Disk staging can use up to 1 GiB
-plus native upload staging and committed data. Storage retains history; scans
+plus native upload staging and committed data. Recovery adds up to 192 MiB of
+temporary transfers and a 256 MiB/128-version durable queue. Storage retains history; scans
 and startup auditing grow with it. No throughput or power-loss guarantee is made.
 
 ```bash
@@ -91,7 +93,9 @@ docker compose -f infra/compose/compose.yaml down
 ```
 
 Volumes survive shutdown. Acknowledged data survives tested owner process kills
-and volume-preserving restarts. Hints, read repair, tombstones and anti-entropy
-are not implemented: an offline owner does not catch up automatically yet.
+and volume-preserving restarts. Durable hints and read repair now propagate live
+versions and tombstones. See [deletion and recovery](recovery.md) for semantics,
+backlog handling and the coordinated storage-format upgrade. Anti-entropy is
+still pending.
 Back up before upgrade; do not resume writes from stale checkpoints or run two
 copies of a node identity. Upgrade all nodes together before enabling these RPCs.

@@ -8,7 +8,11 @@ public final class Siblings {
 
   private Siblings() {}
 
-  public record Entry(UUID id, VectorClock clock, String digest) {
+  public record Entry(UUID id, VectorClock clock, String digest, boolean tombstone) {
+    public Entry(UUID id, VectorClock clock, String digest) {
+      this(id, clock, digest, false);
+    }
+
     public Entry {
       Objects.requireNonNull(id);
       Objects.requireNonNull(clock);
@@ -21,7 +25,8 @@ public final class Siblings {
     List<Entry> all = List.copyOf(versions);
     for (Entry a : all)
       for (Entry b : all) {
-        if ((a.clock().equals(b.clock()) && !a.digest().equals(b.digest()))
+        if ((a.clock().equals(b.clock())
+                && (!a.digest().equals(b.digest()) || a.tombstone() != b.tombstone()))
             || (a.id().equals(b.id()) && !a.equals(b)))
           throw new IllegalArgumentException("Causal identity has conflicting content");
       }

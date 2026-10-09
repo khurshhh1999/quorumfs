@@ -37,6 +37,7 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
         .setVersionId(id)
         .setVector(Wire.vector(store.vector(value.id())))
         .setSize(value.size())
+        .setTombstone(value.tombstone())
         .setSha256(ByteString.copyFrom(value.sha256()))
         .build();
   }
@@ -68,54 +69,91 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
 
         @Override
         protected ReplicaAck complete() throws Exception {
-          ObjectKey key = header.getObject();
-          VersionMetadata version = header.getVersion();
-          boolean exists = false;
-          try {
-            VersionMetadata previous = metadata(key, version.getVersionId());
-            if (!previous.equals(version)) throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
-            store.read(
-                key.getNamespace(),
-                key.getKey().toByteArray(),
-                Wire.uuid(version.getVersionId()),
-                OutputStream.nullOutputStream());
-            exists = true;
-          } catch (StorageException e) {
-            if (e.code() != StorageException.Code.NOT_FOUND) throw e;
-          }
-          if (!exists) {
-            try (var upload =
-                    store.beginReplica(
-                        key.getNamespace(),
-                        key.getKey().toByteArray(),
-                        version.getSize(),
-                        version.getSha256().toByteArray(),
-                        Wire.vector(version.getVector(), ring),
-                        ring,
-                        Wire.uuid(version.getVersionId()));
-                var input = spool.input()) {
-              byte[] bytes;
-              long offset = 0;
-              while ((bytes = input.readNBytes(Wire.CHUNK)).length != 0) {
-                Streams.remaining(end);
-                upload.append(offset, bytes, Wire.hash(bytes).toByteArray());
-                offset += bytes.length;
-              }
-              Streams.remaining(end);
-              upload.commit();
-            }
-          }
-          return ReplicaAck.newBuilder()
-              .setCluster(Wire.identity(ring))
-              .setNodeId(node)
-              .setVersionId(version.getVersionId())
-              .setDurable(true)
-              .build();
+          return ingest(header, spool, end);
         }
       };
     } catch (RuntimeException e) {
       response.onError(RpcFailure.map(e));
       return ignored();
+    }
+  }
+
+  private ReplicaAck ingest(ReplicaHeader header, Spool spool, long end) throws Exception {
+    // Serialize duplicate replay against foreground publication, including the existence check.
+    synchronized (store) {
+      ObjectKey key = header.getObject();
+      VersionMetadata version = header.getVersion();
+      boolean exists = false;
+      try {
+        VersionMetadata previous = metadata(key, version.getVersionId());
+        if (!previous.equals(version)) throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
+        store.read(
+            key.getNamespace(),
+            key.getKey().toByteArray(),
+            Wire.uuid(version.getVersionId()),
+            OutputStream.nullOutputStream());
+        exists = true;
+      } catch (StorageException e) {
+        if (e.code() != StorageException.Code.NOT_FOUND) throw e;
+      }
+      if (!exists) {
+        try (var upload =
+                store.beginReplica(
+                    key.getNamespace(),
+                    key.getKey().toByteArray(),
+                    version.getSize(),
+                    version.getSha256().toByteArray(),
+                    Wire.vector(version.getVector(), ring),
+                    ring,
+                    Wire.uuid(version.getVersionId()),
+                    version.getTombstone());
+            var input = spool.input()) {
+          byte[] bytes;
+          long offset = 0;
+          while ((bytes = input.readNBytes(Wire.CHUNK)).length != 0) {
+            Streams.remaining(end);
+            upload.append(offset, bytes, Wire.hash(bytes).toByteArray());
+            offset += bytes.length;
+          }
+          Streams.remaining(end);
+          upload.commit();
+        }
+      }
+      return ReplicaAck.newBuilder()
+          .setCluster(Wire.identity(ring))
+          .setNodeId(node)
+          .setVersionId(version.getVersionId())
+          .setDurable(true)
+          .build();
+    }
+  }
+
+  @Override
+  public StreamObserver<ReplicaFrame> deliverHint(StreamObserver<ReplicaAck> response) {
+    return replicateVersion(response);
+  }
+
+  @Override
+  public void applyTombstone(TombstoneRequest request, StreamObserver<ReplicaAck> response) {
+    if (!slots.tryAcquire()) {
+      response.onError(Errors.exception(ErrorReason.CAPACITY_EXHAUSTED));
+      return;
+    }
+    try {
+      var header = request.getHeader();
+      check(header.getCluster(), header.getObject());
+      Wire.request(header.getRequestId());
+      Wire.version(header.getVersion(), ring);
+      if (!header.getVersion().getTombstone()) throw Errors.exception(ErrorReason.INVALID_REQUEST);
+      try (var spool = new Spool(transfers, 0, Wire.hash(new byte[0]).toByteArray())) {
+        spool.finish();
+        response.onNext(ingest(header, spool, Streams.end()));
+        response.onCompleted();
+      }
+    } catch (Exception e) {
+      response.onError(RpcFailure.map(e));
+    } finally {
+      slots.release();
     }
   }
 

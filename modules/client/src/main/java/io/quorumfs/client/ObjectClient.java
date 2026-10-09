@@ -44,6 +44,17 @@ public final class ObjectClient implements AutoCloseable {
         .getVersionsList();
   }
 
+  public WriteResult delete(ObjectKey key, VectorClock context) {
+    return ObjectStoreGrpc.newBlockingStub(authorized)
+        .withDeadlineAfter(timeout.toNanos(), TimeUnit.NANOSECONDS)
+        .deleteObject(
+            DeleteObjectRequest.newBuilder()
+                .setObject(key)
+                .setRequestId(UUID.randomUUID().toString())
+                .setContext(Wire.vector(context))
+                .build());
+  }
+
   public WriteResult put(ObjectKey key, Path file, VectorClock context, boolean resolve)
       throws Exception {
     if (!Files.isRegularFile(file))
@@ -120,6 +131,7 @@ public final class ObjectClient implements AutoCloseable {
       if (!first.hasHeader()) throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
       var header = first.getHeader();
       Wire.content(header.getSize(), header.getSha256());
+      if (header.getTombstone()) throw Errors.exception(ErrorReason.OBJECT_NOT_FOUND);
       MessageDigest hash = Wire.digest();
       long received = 0;
       try (OutputStream sink = Files.newOutputStream(temp)) {

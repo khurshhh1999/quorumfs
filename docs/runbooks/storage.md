@@ -70,3 +70,13 @@ throwaway 8 MiB tmpfs and verifies native NoSpace with no acknowledgment.
 
 Generated reports live under ignored build directories. No reports, archives,
 descriptor binaries, DB files or other execution artifacts belong in Git.
+
+## Recovery format upgrade
+
+The deletion/recovery binary accepts prior format 1 databases and synchronously
+upgrades the marker to 2. It retains legacy/live manifests and adds causal
+tombstones and bounded pinned hint payloads. Old binaries reject format 2.
+Checkpoints include this recovery state; startup/restore verifies published hint
+checksums and removes only unpublished hint chunks. Stop all nodes and back up
+before upgrading; mixed-version service and in-place downgrade are unsupported.
+See [deletion and recovery](recovery.md) for rollback and backlog procedures.

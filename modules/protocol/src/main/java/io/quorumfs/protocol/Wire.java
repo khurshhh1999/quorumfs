@@ -67,7 +67,9 @@ public final class Wire {
   public static void version(VersionMetadata version, HashRing ring) {
     uuid(version.getVersionId());
     content(version.getSize(), version.getSha256());
-    if (version.getTombstone() || vector(version.getVector(), ring).counters().isEmpty())
+    if ((version.getTombstone()
+            && (version.getSize() != 0 || !version.getSha256().equals(hash(new byte[0]))))
+        || vector(version.getVector(), ring).counters().isEmpty())
       throw Errors.exception(ErrorReason.INVALID_REQUEST);
   }
 
@@ -92,7 +94,8 @@ public final class Wire {
       VectorClock causal = vector(version.getVector(), ring);
       VersionMetadata previous = byVector.putIfAbsent(causal, version);
       if (previous != null
-          && (previous.getSize() != version.getSize()
+          && (previous.getTombstone() != version.getTombstone()
+              || previous.getSize() != version.getSize()
               || !previous.getSha256().equals(version.getSha256())))
         throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
       UUID id = uuid(version.getVersionId());
@@ -103,7 +106,8 @@ public final class Wire {
           new Siblings.Entry(
               id,
               vector(version.getVector(), ring),
-              HexFormat.of().formatHex(version.getSha256().toByteArray())));
+              HexFormat.of().formatHex(version.getSha256().toByteArray()),
+              version.getTombstone()));
     }
     try {
       return Siblings.merge(entries).stream().map(e -> byId.get(e.id())).toList();

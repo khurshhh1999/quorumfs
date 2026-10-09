@@ -9,7 +9,7 @@ build tooling; dependency locks and verification metadata remain versioned.
 ```bash
 cd /Users/khursheed/Documents/Playground/quorumfs
 git status --short
-git add -- .gitignore .gitattributes .dockerignore .github AGENTS.md README.md Dockerfile build.gradle settings.gradle gradle.properties gradlew gradlew.bat gradle modules infra tests docs/adr docs/contracts docs/runbooks docs/evidence/Q0/README.md docs/handoffs/phase-1-commands.md docs/handoffs/phase-1-pr.md plan.md implementation.md delivery.md
+git add -- .gitignore .gitattributes .dockerignore .github README.md Dockerfile build.gradle settings.gradle gradle.properties gradlew gradlew.bat gradle modules infra tests docs/adr docs/contracts docs/runbooks docs/evidence/Q0/README.md docs/handoffs/phase-1-commands.md docs/handoffs/phase-1-pr.md
 git diff --cached --check
 git diff --cached --stat
 git diff --cached

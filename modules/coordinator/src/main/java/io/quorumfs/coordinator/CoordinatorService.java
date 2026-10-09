@@ -18,6 +18,7 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
   private final ObjectStorage store;
   private final HashRing ring;
   private final PeerClient peers;
+  private final Recovery recovery;
   private final ClusterInfo info;
   private final Path transfers;
   private final Set<String> namespaces;
@@ -37,6 +38,7 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
     this.info = info;
     this.transfers = transfers;
     this.namespaces = Set.copyOf(namespaces);
+    recovery = new Recovery(store, peers, ring, transfers);
   }
 
   private void authorize(ObjectKey key) {
@@ -132,53 +134,94 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
 
         @Override
         protected WriteResult complete() throws Exception {
-          // This read preflight avoids allocation when a quorum is already known unavailable.
-          var observed =
-              quorum(
-                  header.getObject(),
-                  info.getWriteQuorum(),
-                  end,
-                  false,
-                  node -> peers.read(node, header.getObject(), end));
-          var vector = store.allocateVector(Wire.vector(header.getContext(), ring));
-          var version =
-              VersionMetadata.newBuilder()
-                  .setVersionId(UUID.randomUUID().toString())
-                  .setVector(Wire.vector(vector))
-                  .setSize(header.getSize())
-                  .setSha256(header.getSha256())
-                  .build();
-          List<VersionMetadata> candidates = new ArrayList<>();
-          for (var reply : observed) candidates.addAll(reply.value().getVersionsList());
-          candidates.add(version);
-          Wire.merge(
-              candidates, ring); // Detect known sibling exhaustion before sending any version.
-          var replica =
-              ReplicaHeader.newBuilder()
-                  .setCluster(Wire.identity(ring))
-                  .setObject(header.getObject())
-                  .setVersion(version)
-                  .setRequestId(header.getRequestId())
-                  .build();
-          var acknowledgments =
-              quorum(
-                  header.getObject(),
-                  info.getWriteQuorum(),
-                  end,
-                  true,
-                  node -> peers.put(node, replica, spool, end));
-          System.out.printf(
-              "event=quorum_write node=%s durable_owners=%d%n",
-              info.getNodeId(), acknowledgments.size());
-          return WriteResult.newBuilder()
-              .setVersion(version)
-              .setDurableOwnerCount(acknowledgments.size())
-              .build();
+          return publish(header, spool, false, end);
         }
       };
     } catch (RuntimeException e) {
       response.onError(RpcFailure.map(e));
       return ReplicaService.ignored();
+    }
+  }
+
+  private WriteResult publish(WriteHeader header, Spool spool, boolean tombstone, long end)
+      throws Exception {
+    // This read preflight avoids allocation when a quorum is already known unavailable.
+    var observed =
+        quorum(
+            header.getObject(),
+            info.getWriteQuorum(),
+            end,
+            false,
+            node -> peers.read(node, header.getObject(), end));
+    var vector = store.allocateVector(Wire.vector(header.getContext(), ring));
+    var version =
+        VersionMetadata.newBuilder()
+            .setVersionId(UUID.randomUUID().toString())
+            .setVector(Wire.vector(vector))
+            .setSize(header.getSize())
+            .setTombstone(tombstone)
+            .setSha256(header.getSha256())
+            .build();
+    List<VersionMetadata> candidates = new ArrayList<>();
+    for (var reply : observed) candidates.addAll(reply.value().getVersionsList());
+    candidates.add(version);
+    Wire.merge(candidates, ring); // Detect known sibling exhaustion before sending any version.
+    var replica =
+        ReplicaHeader.newBuilder()
+            .setCluster(Wire.identity(ring))
+            .setObject(header.getObject())
+            .setVersion(version)
+            .setRequestId(header.getRequestId())
+            .build();
+    recovery.persist(
+        replica,
+        spool,
+        ring.owners(header.getObject().getNamespace(), header.getObject().getKey().toByteArray()));
+    var acknowledgments =
+        quorum(
+            header.getObject(),
+            info.getWriteQuorum(),
+            end,
+            true,
+            node -> {
+              var ack = peers.put(node, replica, spool, end);
+              store.acknowledgeHint(Wire.uuid(version.getVersionId()), node);
+              return ack;
+            });
+    System.out.printf(
+        "event=quorum_write node=%s durable_owners=%d%n", info.getNodeId(), acknowledgments.size());
+    return WriteResult.newBuilder()
+        .setVersion(version)
+        .setDurableOwnerCount(acknowledgments.size())
+        .build();
+  }
+
+  @Override
+  public void deleteObject(DeleteObjectRequest request, StreamObserver<WriteResult> response) {
+    if (!slots.tryAcquire()) {
+      response.onError(Errors.exception(ErrorReason.CAPACITY_EXHAUSTED));
+      return;
+    }
+    try {
+      authorize(request.getObject());
+      Wire.request(request.getRequestId());
+      Wire.vector(request.getContext(), ring);
+      try (var spool = new Spool(transfers, 0, Wire.hash(new byte[0]).toByteArray())) {
+        spool.finish();
+        var header =
+            WriteHeader.newBuilder()
+                .setObject(request.getObject())
+                .setRequestId(request.getRequestId())
+                .setContext(request.getContext())
+                .setSha256(Wire.hash(new byte[0]))
+                .build();
+        response.onNext(publish(header, spool, true, Streams.end()));
+        response.onCompleted();
+      }
+    } catch (Exception e) {
+      response.onError(RpcFailure.map(e));
+    } finally {
+      slots.release();
     }
   }
 
@@ -197,7 +240,11 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
             .computeIfAbsent(version.getVersionId(), ignored -> new ArrayList<>())
             .add(response.node());
       }
-    return new Read(Wire.merge(versions, ring), holders);
+    var merged = Wire.merge(versions, ring);
+    Map<String, List<VersionMetadata>> observed = new HashMap<>();
+    for (var reply : responses) observed.put(reply.node(), reply.value().getVersionsList());
+    recovery.repair(key, merged, holders, observed);
+    return new Read(merged, holders);
   }
 
   @Override
@@ -244,6 +291,7 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
                   .filter(v -> v.getVersionId().equals(request.getVersionId()))
                   .findFirst()
                   .orElseThrow(() -> Errors.exception(ErrorReason.OBJECT_NOT_FOUND));
+      if (selected.getTombstone()) throw Errors.exception(ErrorReason.OBJECT_NOT_FOUND);
       Spool data = null;
       Exception last = null;
       for (String holder : read.holders().get(selected.getVersionId())) {
@@ -288,7 +336,9 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
 
   @Override
   public void close() {
+    recovery.close();
     workers.shutdownNow();
+    workers.close();
     peers.close();
   }
 }

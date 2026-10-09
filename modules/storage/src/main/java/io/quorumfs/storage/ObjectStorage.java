@@ -5,8 +5,7 @@ import static io.quorumfs.storage.StorageException.Code.*;
 import io.quorumfs.ring.HashRing;
 import io.quorumfs.versioning.Siblings;
 import io.quorumfs.versioning.VectorClock;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -41,6 +40,7 @@ public final class ObjectStorage implements AutoCloseable {
   private static final byte[] FORMAT = "storage-format".getBytes(StandardCharsets.UTF_8);
   private static final byte[] COUNTER = new byte[] {1};
   private static final byte[] FORMAT_V1 = new byte[] {1};
+  private static final byte[] FORMAT_V2 = new byte[] {2};
   private static final byte[] RING = {1}, NODE = {2};
   private HashRing ring;
   private String node;
@@ -82,7 +82,11 @@ public final class ObjectStorage implements AutoCloseable {
     }
   }
 
-  public record Version(UUID id, long sequence, long size, byte[] sha256) {
+  public record Version(UUID id, long sequence, long size, byte[] sha256, boolean tombstone) {
+    public Version(UUID id, long sequence, long size, byte[] sha256) {
+      this(id, sequence, size, sha256, false);
+    }
+
     public Version {
       sha256 = sha256.clone();
     }
@@ -109,7 +113,9 @@ public final class ObjectStorage implements AutoCloseable {
     WAL_SYNC,
     MANIFEST_WRITE,
     AFTER_MANIFEST,
-    CLEANUP
+    CLEANUP,
+    HINT_PUBLISH,
+    HINT_ACK
   }
 
   @FunctionalInterface
@@ -164,12 +170,12 @@ public final class ObjectStorage implements AutoCloseable {
             "Persisted node/cluster identity or membership differs; refusing startup");
       }
       byte[] format = db.get(FORMAT);
-      if (format != null && !Arrays.equals(format, FORMAT_V1))
+      if (format != null && !Arrays.equals(format, FORMAT_V1) && !Arrays.equals(format, FORMAT_V2))
         throw new StorageException(CORRUPT, "Unsupported storage format");
       try (WriteBatch batch = new WriteBatch();
           WriteOptions write = sync()) {
         batch.put(IDENTITY, expected);
-        batch.put(FORMAT, FORMAT_V1);
+        batch.put(FORMAT, FORMAT_V2);
         db.write(write, batch);
       }
       byte[] persistedRing = db.get(cf("ring"), RING);
@@ -384,6 +390,24 @@ public final class ObjectStorage implements AutoCloseable {
     return beginVersion(namespace, key, size, sha256, Objects.requireNonNull(vector), true, id);
   }
 
+  /** Tombstones use the same atomic publication and causal merge as live replicas. */
+  public synchronized Upload beginReplica(
+      String namespace,
+      byte[] key,
+      long size,
+      byte[] sha256,
+      VectorClock vector,
+      HashRing peer,
+      UUID id,
+      boolean tombstone)
+      throws IOException {
+    if (tombstone && (size != 0 || !MessageDigest.isEqual(sha256, sha256(new byte[0]))))
+      throw new StorageException(INVALID, "Invalid tombstone payload");
+    Upload upload = beginReplica(namespace, key, size, sha256, vector, peer, id);
+    upload.tombstone = tombstone;
+    return upload;
+  }
+
   /** Resolve precisely the observed contexts; a concurrent unobserved sibling remains visible. */
   public synchronized Upload resolve(
       String namespace, byte[] key, long size, byte[] sha256, Collection<UUID> observed)
@@ -441,7 +465,8 @@ public final class ObjectStorage implements AutoCloseable {
   }
 
   private static Siblings.Entry entry(Version version, VectorClock vector) {
-    return new Siblings.Entry(version.id(), vector, HexFormat.of().formatHex(version.sha256()));
+    return new Siblings.Entry(
+        version.id(), vector, HexFormat.of().formatHex(version.sha256()), version.tombstone());
   }
 
   private List<Siblings.Entry> heads(byte[] prefix) throws IOException, RocksDBException {
@@ -489,7 +514,8 @@ public final class ObjectStorage implements AutoCloseable {
           UUID id = StorageKeys.manifestId(iterator.key());
           VectorClock previous = checkedVector(db.get(cf("vectors"), StorageKeys.id(id)));
           if (previous.equals(vector)
-              && !MessageDigest.isEqual(decode(id, iterator.value()).sha256(), version.sha256()))
+              && (!MessageDigest.isEqual(decode(id, iterator.value()).sha256(), version.sha256())
+                  || decode(id, iterator.value()).tombstone() != version.tombstone()))
             throw new StorageException(CORRUPT, "Equal vector has different content");
         }
         iterator.status();
@@ -511,7 +537,7 @@ public final class ObjectStorage implements AutoCloseable {
           iterator.next()) {
         byte[] raw = iterator.value();
         decode(StorageKeys.manifestId(iterator.key()), raw);
-        if ((raw[0] == 2) != causal)
+        if ((raw[0] >= 2) != causal)
           throw new StorageException(
               INVALID, "Legacy and causal versions require separate object keys");
       }
@@ -536,6 +562,7 @@ public final class ObjectStorage implements AutoCloseable {
     private final MessageDigest checksum = digest();
     private long received;
     private boolean done;
+    private boolean tombstone;
 
     private Upload(
         UUID id, byte[] key, long sequence, long size, byte[] expected, VectorClock vector) {
@@ -605,7 +632,7 @@ public final class ObjectStorage implements AutoCloseable {
         if (received != size || !MessageDigest.isEqual(checksum.digest(), expected))
           invalid("Object size or whole-object checksum mismatch");
         requireKind(Arrays.copyOf(manifestKey, manifestKey.length - 16), vector != null);
-        Version result = new Version(id, sequence, size, expected);
+        Version result = new Version(id, sequence, size, expected, tombstone);
         List<Siblings.Entry> next =
             vector == null ? List.of() : mergedHeads(manifestKey, result, vector);
         try {
@@ -616,7 +643,7 @@ public final class ObjectStorage implements AutoCloseable {
               WriteOptions write = sync()) {
             byte[] manifest = encode(result);
             if (vector != null) {
-              manifest[0] = 2;
+              manifest[0] = (byte) (tombstone ? 3 : 2);
               batch.put(cf("vectors"), StorageKeys.id(id), vector.serialize());
               byte[] prefix = Arrays.copyOf(manifestKey, manifestKey.length - 16);
               for (Siblings.Entry head : heads(prefix))
@@ -673,7 +700,7 @@ public final class ObjectStorage implements AutoCloseable {
 
   private static Version decode(UUID id, byte[] bytes) throws StorageException {
     if (bytes == null) throw new StorageException(NOT_FOUND, "Version not found");
-    if (bytes.length != 53 || (bytes[0] != 1 && bytes[0] != 2))
+    if (bytes.length != 53 || (bytes[0] != 1 && bytes[0] != 2 && bytes[0] != 3))
       throw new StorageException(CORRUPT, "Invalid manifest encoding");
     ByteBuffer b = ByteBuffer.wrap(bytes);
     b.get();
@@ -683,7 +710,9 @@ public final class ObjectStorage implements AutoCloseable {
     b.get(hash);
     if (sequence < 1 || size < 0 || size > MAX_OBJECT_BYTES || chunk != CHUNK_BYTES)
       throw new StorageException(CORRUPT, "Invalid manifest fields");
-    return new Version(id, sequence, size, hash);
+    if (bytes[0] == 3 && (size != 0 || !MessageDigest.isEqual(hash, sha256(new byte[0]))))
+      throw new StorageException(CORRUPT, "Invalid tombstone");
+    return new Version(id, sequence, size, hash, bytes[0] == 3);
   }
 
   public synchronized Version head(String namespace, byte[] key, UUID version) throws IOException {
@@ -767,6 +796,7 @@ public final class ObjectStorage implements AutoCloseable {
       }
       iterator.status();
     }
+    auditHints(true);
     verifyAll();
   }
 
@@ -787,7 +817,7 @@ public final class ObjectStorage implements AutoCloseable {
           Version version = decode(id, iterator.value());
           maximumSequence = Math.max(maximumSequence, version.sequence());
           byte[] rawVector = db.get(cf("vectors"), StorageKeys.id(id));
-          if ((iterator.value()[0] == 2) != (rawVector != null))
+          if ((iterator.value()[0] >= 2) != (rawVector != null))
             throw new StorageException(CORRUPT, "Missing or unexpected causal metadata");
           if (rawVector != null) {
             VectorClock vector = checkedVector(rawVector);
@@ -822,7 +852,7 @@ public final class ObjectStorage implements AutoCloseable {
         for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
           byte[] key = db.get(cf("requests"), iterator.key());
           byte[] manifest = key == null ? null : db.get(cf("manifests"), key);
-          if (manifest == null || manifest[0] != 2)
+          if (manifest == null || manifest[0] < 2)
             throw new StorageException(CORRUPT, "Orphan causal vector");
           checkedVector(iterator.value());
         }
@@ -849,6 +879,11 @@ public final class ObjectStorage implements AutoCloseable {
       throw failure(e);
     } catch (IllegalArgumentException | IllegalStateException e) {
       throw new StorageException(CORRUPT, "Invalid committed metadata", e);
+    }
+    try {
+      auditHints(false);
+    } catch (RocksDBException e) {
+      throw failure(e);
     }
     return count;
   }
@@ -915,6 +950,288 @@ public final class ObjectStorage implements AutoCloseable {
           for (Path file : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(file);
         }
       }
+    }
+  }
+
+  public static final int MAX_HINTS = 128;
+  public static final long MAX_HINT_BYTES = 256L * 1024 * 1024;
+
+  /** Private payload copies are pinned until every destination acknowledges; never object heads. */
+  public record Hint(
+      UUID id,
+      byte[] metadata,
+      List<String> destinations,
+      long size,
+      byte[] sha256,
+      long createdMillis) {
+    public Hint {
+      metadata = metadata.clone();
+      sha256 = sha256.clone();
+      destinations = List.copyOf(destinations);
+    }
+
+    @Override
+    public byte[] metadata() {
+      return metadata.clone();
+    }
+
+    @Override
+    public byte[] sha256() {
+      return sha256.clone();
+    }
+  }
+
+  public record HintStats(
+      int pendingVersions, int pendingDeliveries, long bytes, long oldestMillis) {}
+
+  private static byte[] encodeHint(Hint hint) throws IOException {
+    var bytes = new ByteArrayOutputStream();
+    try (var out = new DataOutputStream(bytes)) {
+      out.writeByte(1);
+      out.writeLong(hint.size());
+      out.write(hint.sha256());
+      out.writeLong(hint.createdMillis());
+      out.writeInt(hint.metadata().length);
+      out.write(hint.metadata());
+      out.writeInt(hint.destinations().size());
+      for (String destination : hint.destinations()) out.writeUTF(destination);
+    }
+    return bytes.toByteArray();
+  }
+
+  private Hint decodeHint(UUID id, byte[] raw) throws IOException {
+    try (var in = new DataInputStream(new ByteArrayInputStream(raw))) {
+      if (in.readUnsignedByte() != 1) throw new IOException("Unknown hint format");
+      long size = in.readLong();
+      byte[] hash = in.readNBytes(32);
+      long created = in.readLong();
+      int length = in.readInt();
+      if (size < 0
+          || size > MAX_OBJECT_BYTES
+          || hash.length != 32
+          || created < 0
+          || length < 1
+          || length > 65536) throw new IOException("Invalid hint fields");
+      byte[] metadata = in.readNBytes(length);
+      int count = in.readInt();
+      if (count < 1 || count > 5 || metadata.length != length || ring == null)
+        throw new IOException("Invalid hint destinations");
+      List<String> destinations = new ArrayList<>();
+      for (int i = 0; i < count; i++) {
+        String destination = in.readUTF();
+        if (!ring.nodeIds().contains(destination) || destinations.contains(destination))
+          throw new IOException("Invalid hint destination");
+        destinations.add(destination);
+      }
+      if (in.read() != -1) throw new IOException("Trailing hint data");
+      return new Hint(id, metadata, destinations, size, hash, created);
+    } catch (IOException | RuntimeException e) {
+      throw new StorageException(CORRUPT, "Invalid durable hint", e);
+    }
+  }
+
+  public synchronized List<Hint> hints() throws IOException {
+    open();
+    List<Hint> result = new ArrayList<>();
+    try (RocksIterator iterator = db.newIterator(cf("hints"))) {
+      for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+        if (iterator.key().length == 17) {
+          result.add(decodeHint(StorageKeys.id(iterator.key()), iterator.value()));
+          if (result.size() > MAX_HINTS) throw new StorageException(CORRUPT, "Hint limit exceeded");
+        }
+      }
+      iterator.status();
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+    return List.copyOf(result);
+  }
+
+  public synchronized HintStats hintStats() throws IOException {
+    var all = hints();
+    return new HintStats(
+        all.size(),
+        all.stream().mapToInt(h -> h.destinations().size()).sum(),
+        all.stream().mapToLong(Hint::size).sum(),
+        all.stream().mapToLong(Hint::createdMillis).min().orElse(0));
+  }
+
+  /** Persist payload then atomically publish all delivery intents before remote dispatch. */
+  public synchronized void enqueueHint(
+      UUID id,
+      byte[] metadata,
+      List<String> destinations,
+      long size,
+      byte[] hash,
+      InputStream input)
+      throws IOException {
+    open();
+    if (ring == null
+        || destinations.isEmpty()
+        || destinations.size() > 5
+        || new HashSet<>(destinations).size() != destinations.size()
+        || !ring.nodeIds().containsAll(destinations)
+        || metadata.length < 1
+        || metadata.length > 65536
+        || size < 0
+        || size > MAX_OBJECT_BYTES
+        || hash.length != 32) throw new StorageException(INVALID, "Invalid hint");
+    try {
+      byte[] previous = db.get(cf("hints"), StorageKeys.id(id));
+      if (previous != null) {
+        Hint old = decodeHint(id, previous);
+        if (!Arrays.equals(old.metadata(), metadata)
+            || old.size() != size
+            || !MessageDigest.isEqual(old.sha256(), hash))
+          throw new StorageException(CORRUPT, "Hint identity collision");
+        var targets = new TreeSet<>(old.destinations());
+        targets.addAll(destinations);
+        try (WriteOptions write = sync()) {
+          db.put(
+              cf("hints"),
+              write,
+              StorageKeys.id(id),
+              encodeHint(
+                  new Hint(id, metadata, List.copyOf(targets), size, hash, old.createdMillis())));
+        }
+        return;
+      }
+      var stats = hintStats();
+      if (stats.pendingVersions() >= MAX_HINTS || size > MAX_HINT_BYTES - stats.bytes())
+        throw new StorageException(CAPACITY, "Durable hint budget exhausted");
+      MessageDigest checksum = digest();
+      try {
+        try (WriteOptions write = new WriteOptions().setDisableWAL(false)) {
+          long offset = 0;
+          while (offset < size) {
+            if (Thread.currentThread().isInterrupted())
+              throw new IOException("Hint capture cancelled");
+            byte[] data = input.readNBytes((int) Math.min(CHUNK_BYTES, size - offset));
+            if (data.length != Math.min(CHUNK_BYTES, size - offset))
+              throw new StorageException(INVALID, "Truncated hint payload");
+            checksum.update(data);
+            db.put(
+                cf("hints"),
+                write,
+                StorageKeys.chunk(id, offset),
+                ByteBuffer.allocate(32 + data.length).put(sha256(data)).put(data).array());
+            offset += data.length;
+          }
+        }
+        if (input.read() != -1 || !MessageDigest.isEqual(checksum.digest(), hash))
+          throw new StorageException(INVALID, "Hint checksum mismatch");
+        faults.at(Point.HINT_PUBLISH);
+        try (WriteOptions write = sync()) {
+          db.put(
+              cf("hints"),
+              write,
+              StorageKeys.id(id),
+              encodeHint(
+                  new Hint(id, metadata, destinations, size, hash, System.currentTimeMillis())));
+        }
+      } catch (IOException e) {
+        // Unpublished chunks are never delivery promises; startup also collects these after a kill.
+        try (WriteOptions write = sync()) {
+          db.deleteRange(
+              cf("hints"), write, StorageKeys.chunk(id, 0), StorageKeys.chunk(id, Long.MAX_VALUE));
+        }
+        throw e;
+      }
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  private void scanHint(Hint hint, OutputStream output) throws IOException, RocksDBException {
+    MessageDigest checksum = digest();
+    for (long offset = 0; offset < hint.size(); offset += CHUNK_BYTES) {
+      byte[] chunk = db.get(cf("hints"), StorageKeys.chunk(hint.id(), offset));
+      int length = (int) Math.min(CHUNK_BYTES, hint.size() - offset);
+      if (chunk == null
+          || chunk.length != length + 32
+          || !MessageDigest.isEqual(
+              sha256(Arrays.copyOfRange(chunk, 32, chunk.length)), Arrays.copyOf(chunk, 32)))
+        throw new StorageException(CORRUPT, "Corrupt hint payload");
+      checksum.update(chunk, 32, length);
+      output.write(chunk, 32, length);
+    }
+    if (!MessageDigest.isEqual(checksum.digest(), hint.sha256()))
+      throw new StorageException(CORRUPT, "Corrupt hint checksum");
+  }
+
+  public synchronized void readHint(UUID id, OutputStream output) throws IOException {
+    open();
+    try {
+      byte[] raw = db.get(cf("hints"), StorageKeys.id(id));
+      if (raw == null) throw new StorageException(NOT_FOUND, "Hint already acknowledged");
+      Hint hint = decodeHint(id, raw);
+      scanHint(hint, OutputStream.nullOutputStream());
+      scanHint(hint, output);
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  /** Call only after validating the canonical destination's durable version acknowledgment. */
+  public synchronized void acknowledgeHint(UUID id, String destination) throws IOException {
+    open();
+    try {
+      byte[] raw = db.get(cf("hints"), StorageKeys.id(id));
+      if (raw == null) return;
+      Hint hint = decodeHint(id, raw);
+      var targets = new ArrayList<>(hint.destinations());
+      if (!targets.remove(destination)) return;
+      faults.at(Point.HINT_ACK);
+      try (WriteBatch batch = new WriteBatch();
+          WriteOptions write = sync()) {
+        if (targets.isEmpty()) {
+          batch.delete(cf("hints"), StorageKeys.id(id));
+          batch.deleteRange(
+              cf("hints"), StorageKeys.chunk(id, 0), StorageKeys.chunk(id, Long.MAX_VALUE));
+        } else
+          batch.put(
+              cf("hints"),
+              StorageKeys.id(id),
+              encodeHint(
+                  new Hint(
+                      id,
+                      hint.metadata(),
+                      targets,
+                      hint.size(),
+                      hint.sha256(),
+                      hint.createdMillis())));
+        db.write(write, batch);
+      }
+    } catch (RocksDBException e) {
+      throw failure(e);
+    }
+  }
+
+  private void auditHints(boolean collectUnpublished) throws IOException, RocksDBException {
+    long bytes = 0;
+    for (Hint hint : hints()) {
+      scanHint(hint, OutputStream.nullOutputStream());
+      bytes += hint.size();
+    }
+    if (bytes > MAX_HINT_BYTES) throw new StorageException(CORRUPT, "Hint byte limit exceeded");
+    try (RocksIterator iterator = db.newIterator(cf("hints"));
+        WriteOptions write = sync()) {
+      for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+        byte[] key = iterator.key();
+        if (key.length == 17) continue;
+        if (key.length != 25 || key[0] != 1)
+          throw new StorageException(CORRUPT, "Invalid hint chunk key");
+        byte[] raw = db.get(cf("hints"), Arrays.copyOf(key, 17));
+        if (raw == null && collectUnpublished) db.delete(cf("hints"), write, key);
+        else {
+          if (raw == null) throw new StorageException(CORRUPT, "Unpublished hint chunk");
+          Hint hint = decodeHint(StorageKeys.id(Arrays.copyOf(key, 17)), raw);
+          long offset = ByteBuffer.wrap(key, 17, 8).getLong();
+          if (offset < 0 || offset >= hint.size() || offset % CHUNK_BYTES != 0)
+            throw new StorageException(CORRUPT, "Unexpected hint chunk");
+        }
+      }
+      iterator.status();
     }
   }
 

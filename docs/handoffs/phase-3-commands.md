@@ -12,10 +12,8 @@ git status --short
 git diff --check
 git diff --stat
 git add \
-  AGENTS.md \
   README.md \
   build.gradle \
-  delivery.md \
   docs/adr/0004-ring-and-causal-versions.md \
   docs/evidence/Q2/README.md \
   docs/handoffs/phase-3-commands.md \
@@ -37,7 +35,6 @@ git add \
   modules/versioning/src/main/java/io/quorumfs/versioning/Siblings.java \
   modules/versioning/src/main/java/io/quorumfs/versioning/VectorClock.java \
   modules/versioning/src/test/java/io/quorumfs/versioning/VectorClockTest.java \
-  plan.md \
   tests/system/causal_cli.py \
   tests/system/storage_disk_full.py
 git diff --cached --check
@@ -66,10 +63,8 @@ git pull --ff-only origin main
 
 ## Changed files
 
-- `AGENTS.md`
 - `README.md`
 - `build.gradle`
-- `delivery.md`
 - `docs/adr/0004-ring-and-causal-versions.md`
 - `docs/evidence/Q2/README.md`
 - `docs/handoffs/phase-3-commands.md`
@@ -91,6 +86,5 @@ git pull --ff-only origin main
 - `modules/versioning/src/main/java/io/quorumfs/versioning/Siblings.java`
 - `modules/versioning/src/main/java/io/quorumfs/versioning/VectorClock.java`
 - `modules/versioning/src/test/java/io/quorumfs/versioning/VectorClockTest.java`
-- `plan.md`
 - `tests/system/causal_cli.py`
 - `tests/system/storage_disk_full.py`
