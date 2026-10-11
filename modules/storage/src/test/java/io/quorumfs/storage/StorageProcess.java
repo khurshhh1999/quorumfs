@@ -13,12 +13,14 @@ public final class StorageProcess {
 
   public static void main(String[] args) throws Exception {
     Path directory = Path.of(args[0]), signal = Path.of(args[2]);
+    boolean repair = args[1].startsWith("repair-");
+    boolean[] armed = {false};
     boolean tombstone = args[1].startsWith("tombstone-");
-    boolean causal = args[1].startsWith("causal-") || tombstone;
-    String mode = args[1].replace("causal-", "").replace("tombstone-", "");
+    boolean causal = args[1].startsWith("causal-") || tombstone || repair;
+    String mode = args[1].replace("causal-", "").replace("tombstone-", "").replace("repair-", "");
     ObjectStorage.Faults hook =
         point -> {
-          if (mode.equals(point.name())) {
+          if (mode.equals(point.name()) && (!repair || armed[0])) {
             try {
               ready(signal, "ready");
               Thread.sleep(120_000);
@@ -119,6 +121,10 @@ public final class StorageProcess {
           Thread.sleep(120_000);
         }
         upload.commit();
+        if (repair) {
+          armed[0] = true;
+          store.repair("test", new byte[] {1}, upload.id(), repeated(chunk, size));
+        }
         if (mode.equals("ACKNOWLEDGED")) {
           ready(signal, "acknowledged");
           Thread.sleep(120_000);

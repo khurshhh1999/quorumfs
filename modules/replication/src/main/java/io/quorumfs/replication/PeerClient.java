@@ -148,6 +148,80 @@ public final class PeerClient implements AutoCloseable {
     }
   }
 
+  public MerkleResponse merkle(
+      String node, String localNode, String snapshot, int depth, long end) {
+    var reply =
+        ReplicaStoreGrpc.newBlockingStub(channel(node))
+            .withDeadlineAfter(Streams.remaining(end), TimeUnit.NANOSECONDS)
+            .exchangeMerkle(
+                MerkleRequest.newBuilder()
+                    .setCluster(Wire.identity(ring))
+                    .setPeerNodeId(localNode)
+                    .setRange(Merkle.range(0, 0))
+                    .setSnapshotId(snapshot)
+                    .setDepth(depth)
+                    .build());
+    Wire.compatible(reply.getCluster(), ring);
+    Wire.uuid(reply.getSnapshotId());
+    if (!reply.getNodeId().equals(node)
+        || (!snapshot.isEmpty() && !snapshot.equals(reply.getSnapshotId()))
+        || reply.getNodesCount() != (1 << depth))
+      throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
+    for (int i = 0; i < reply.getNodesCount(); i++) {
+      if (!reply.getNodes(i).getRange().equals(Merkle.range(depth, i))
+          || reply.getNodes(i).getSha256().size() != 32)
+        throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
+    }
+    return reply;
+  }
+
+  public List<RangeVersion> range(
+      String node, String localNode, String snapshot, int leaf, long end) {
+    List<RangeVersion> result = new ArrayList<>();
+    ByteString cursor = ByteString.EMPTY;
+    String previous = "";
+    long metadataBytes = 0;
+    do {
+      var replies =
+          ReplicaStoreGrpc.newBlockingStub(channel(node))
+              .withDeadlineAfter(Streams.remaining(end), TimeUnit.NANOSECONDS)
+              .fetchRangeVersions(
+                  RangeRequest.newBuilder()
+                      .setCluster(Wire.identity(ring))
+                      .setPeerNodeId(localNode)
+                      .setSnapshotId(snapshot)
+                      .setRange(Merkle.range(Merkle.DEPTH, leaf))
+                      .setResumeToken(cursor)
+                      .setLimit(128)
+                      .build());
+      int count = 0;
+      while (replies.hasNext()) {
+        var entry = replies.next();
+        metadataBytes += entry.getSerializedSize();
+        if (entry.getSerializedSize() > 4096 || metadataBytes > 8L * 1024 * 1024)
+          throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
+        Wire.key(entry.getObject());
+        Wire.version(entry.getVersion(), ring);
+        var owners =
+            ring.owners(entry.getObject().getNamespace(), entry.getObject().getKey().toByteArray());
+        String identity = Merkle.identity(entry);
+        if (++count > 128
+            || result.size() >= 8192
+            || Merkle.leaf(entry.getObject()) != leaf
+            || !owners.contains(node)
+            || !owners.contains(localNode)
+            || identity.compareTo(previous) <= 0
+            || entry.getResumeToken().size() != 24
+            || entry.getResumeToken().equals(cursor))
+          throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
+        cursor = entry.getResumeToken();
+        previous = identity;
+        result.add(entry);
+      }
+      if (count < 128) return List.copyOf(result);
+    } while (true);
+  }
+
   @Override
   public void close() {
     channels.values().forEach(ManagedChannel::shutdownNow);

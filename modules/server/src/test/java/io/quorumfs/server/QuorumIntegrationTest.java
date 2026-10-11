@@ -822,6 +822,281 @@ class QuorumIntegrationTest {
     }
   }
 
+  private PeerClient repairPeers(String source) {
+    Map<String, ManagedChannel> channels = new HashMap<>();
+    cluster
+        .links
+        .get(source)
+        .forEach(
+            (node, link) ->
+                channels.put(
+                    node,
+                    NettyChannelBuilder.forAddress("localhost", link.port())
+                        .usePlaintext()
+                        .maxInboundMessageSize(2 * 1024 * 1024)
+                        .build()));
+    return new PeerClient(channels, cluster.ring(), cluster.access.peerToken());
+  }
+
+  private void seed(String node, UUID id, VectorClock vector, boolean tombstone, byte[] data)
+      throws Exception {
+    try (var upload =
+        cluster
+            .nodes
+            .get(node)
+            .store
+            .beginReplica(
+                "demo",
+                key().getKey().toByteArray(),
+                data.length,
+                Wire.hash(data).toByteArray(),
+                vector,
+                cluster.ring(),
+                id,
+                tombstone)) {
+      for (int offset = 0; offset < data.length; offset += Wire.CHUNK) {
+        byte[] part = Arrays.copyOfRange(data, offset, Math.min(data.length, offset + Wire.CHUNK));
+        upload.append(offset, part, Wire.hash(part).toByteArray());
+      }
+      upload.commit();
+    }
+  }
+
+  @Test
+  void periodicAntiEntropyHealsPartitionAfterRestartWithoutHintsOrForegroundReads()
+      throws Exception {
+    var owners = cluster.owners(key());
+    String source = owners.getFirst();
+    UUID old = UUID.randomUUID(),
+        live = UUID.randomUUID(),
+        deleted = UUID.randomUUID(),
+        concurrent = UUID.randomUUID();
+    for (String node : owners)
+      seed(node, old, VectorClock.of(Map.of("node1", 1L)), false, new byte[] {1});
+    seed(source, live, VectorClock.of(Map.of("node1", 2L)), false, new byte[] {2});
+    seed(source, deleted, VectorClock.of(Map.of("node1", 1L, "node2", 1L)), true, new byte[0]);
+    seed(owners.get(1), concurrent, VectorClock.of(Map.of("node3", 1L)), false, new byte[] {3});
+    cluster.partition(Set.of(source));
+    try (var peers = repairPeers(source);
+        var repair =
+            new AntiEntropy(
+                cluster.nodes.get(source).store,
+                cluster.ring(),
+                source,
+                peers,
+                root.resolve(source).resolve("transfers"))) {
+      assertThrows(Exception.class, () -> repair.round(owners.get(1)));
+    }
+    cluster.restart(source);
+    cluster.heal();
+    try (var peers = repairPeers(source);
+        var repair =
+            new AntiEntropy(
+                cluster.nodes.get(source).store,
+                cluster.ring(),
+                source,
+                peers,
+                root.resolve(source).resolve("transfers"))) {
+      repair.start(Duration.ofSeconds(1));
+      Set<UUID> expected = Set.of(live, deleted, concurrent);
+      eventually(
+          () -> {
+            for (String node : owners)
+              if (!expected.equals(
+                  Set.copyOf(
+                      cluster
+                          .nodes
+                          .get(node)
+                          .store
+                          .siblings("demo", key().getKey().toByteArray())
+                          .stream()
+                          .map(e -> e.id())
+                          .toList()))) return false;
+            return true;
+          });
+      for (String node : cluster.ids) assertTrue(cluster.nodes.get(node).store.hints().isEmpty());
+      for (String node : owners) {
+        assertTrue(
+            cluster
+                .nodes
+                .get(node)
+                .store
+                .head("demo", key().getKey().toByteArray(), deleted)
+                .tombstone());
+        var data = new ByteArrayOutputStream();
+        cluster.nodes.get(node).store.read("demo", key().getKey().toByteArray(), live, data);
+        assertArrayEquals(new byte[] {2}, data.toByteArray());
+      }
+    }
+  }
+
+  @Test
+  void antiEntropyDetectsSameMetadataWithCorruptBytesAndRepairsFromHealthyOwner() throws Exception {
+    var owners = cluster.owners(key());
+    String source = owners.get(0), damaged = owners.get(1);
+    UUID id = UUID.randomUUID();
+    byte[] bytes = new byte[Wire.CHUNK + 7];
+    new Random(20261011).nextBytes(bytes);
+    for (String node : owners) seed(node, id, VectorClock.of(Map.of("node1", 1L)), false, bytes);
+    ObjectStorage store = cluster.nodes.get(damaged).store;
+    synchronized (store) {
+      var field = ObjectStorage.class.getDeclaredField("db");
+      field.setAccessible(true);
+      var cf = ObjectStorage.class.getDeclaredMethod("cf", String.class);
+      cf.setAccessible(true);
+      byte[] chunkKey =
+          java.nio.ByteBuffer.allocate(25)
+              .put((byte) 1)
+              .putLong(id.getMostSignificantBits())
+              .putLong(id.getLeastSignificantBits())
+              .putLong(0)
+              .array();
+      ((org.rocksdb.RocksDB) field.get(store))
+          .put(
+              (org.rocksdb.ColumnFamilyHandle) cf.invoke(store, "chunks"),
+              chunkKey,
+              new byte[] {0});
+    }
+    assertThrows(
+        StorageException.class,
+        () ->
+            store.read("demo", key().getKey().toByteArray(), id, OutputStream.nullOutputStream()));
+    try (var peers = repairPeers(source);
+        var repair =
+            new AntiEntropy(
+                cluster.nodes.get(source).store,
+                cluster.ring(),
+                source,
+                peers,
+                root.resolve(source).resolve("transfers"))) {
+      repair.round(damaged);
+    }
+    assertNotEquals(id, store.head("demo", key().getKey().toByteArray(), id).payloadId());
+    var output = new ByteArrayOutputStream();
+    store.read("demo", key().getKey().toByteArray(), id, output);
+    assertArrayEquals(bytes, output.toByteArray());
+    cluster.restart(damaged);
+    assertEquals(1, cluster.nodes.get(damaged).store.verifyAll());
+  }
+
+  @Test
+  void networkMerkleRejectsWrongEpochAndRetainsSnapshotAcrossConcurrentMutation() throws Exception {
+    var owners = cluster.owners(key());
+    String source = owners.get(0), target = owners.get(1);
+    UUID id = UUID.randomUUID();
+    seed(target, id, VectorClock.of(Map.of("node1", 1L)), false, new byte[] {1});
+    var channel = cluster.direct(target);
+    try {
+      Metadata headers = new Metadata();
+      headers.put(PeerClient.TOKEN, cluster.access.peerToken());
+      var stub =
+          ReplicaStoreGrpc.newBlockingStub(
+                  ClientInterceptors.intercept(
+                      channel, MetadataUtils.newAttachHeadersInterceptor(headers)))
+              .withDeadlineAfter(5, TimeUnit.SECONDS);
+      var request =
+          MerkleRequest.newBuilder()
+              .setCluster(Wire.identity(cluster.ring()))
+              .setPeerNodeId(source)
+              .setRange(Merkle.range(0, 0))
+              .build();
+      var snapshot = stub.exchangeMerkle(request);
+      UUID next = UUID.randomUUID();
+      seed(target, next, VectorClock.of(Map.of("node1", 2L)), true, new byte[0]);
+      var old =
+          stub.fetchRangeVersions(
+              RangeRequest.newBuilder()
+                  .setCluster(Wire.identity(cluster.ring()))
+                  .setPeerNodeId(source)
+                  .setSnapshotId(snapshot.getSnapshotId())
+                  .setRange(Merkle.range(4, Merkle.leaf(key())))
+                  .setLimit(128)
+                  .build());
+      assertTrue(old.hasNext());
+      assertEquals(id.toString(), old.next().getVersion().getVersionId());
+      assertFalse(old.hasNext());
+      assertEquals(
+          snapshot.getNodesList(),
+          stub.exchangeMerkle(request.toBuilder().setSnapshotId(snapshot.getSnapshotId()).build())
+              .getNodesList());
+      assertNotEquals(snapshot.getNodesList(), stub.exchangeMerkle(request).getNodesList());
+      assertEquals(
+          Status.Code.FAILED_PRECONDITION,
+          status(
+              assertThrows(
+                  Exception.class,
+                  () ->
+                      stub.exchangeMerkle(
+                          request.toBuilder()
+                              .setCluster(request.getCluster().toBuilder().setEpoch(2))
+                              .build()))));
+      assertEquals(2, cluster.nodes.get(target).store.verifyAll());
+    } finally {
+      channel.shutdownNow();
+    }
+  }
+
+  @Test
+  void paginatedRepairResumesPastThePerRoundVersionBudget() throws Exception {
+    String source = "node1", target = "node2";
+    int found = 0, candidate = 0;
+    while (found < 140) {
+      var object = ObjectClient.key("demo", "page" + candidate++);
+      if (Merkle.leaf(object) != 0
+          || !cluster
+              .ring()
+              .owners("demo", object.getKey().toByteArray())
+              .containsAll(List.of(source, target))) continue;
+      try (var upload =
+          cluster
+              .nodes
+              .get(source)
+              .store
+              .beginCausal(
+                  "demo",
+                  object.getKey().toByteArray(),
+                  0,
+                  Wire.hash(new byte[0]).toByteArray(),
+                  VectorClock.empty())) {
+        upload.commit();
+      }
+      found++;
+    }
+    try (var peers = repairPeers(source);
+        var repair =
+            new AntiEntropy(
+                cluster.nodes.get(source).store,
+                cluster.ring(),
+                source,
+                peers,
+                root.resolve(source).resolve("transfers"))) {
+      repair.round(target);
+      assertEquals(128, cluster.nodes.get(target).store.verifyAll());
+      repair.round(target);
+      assertEquals(140, cluster.nodes.get(target).store.verifyAll());
+    }
+  }
+
+  @Test
+  void oversizedPeerMetadataCannotBypassInventoryMemoryBounds() throws Exception {
+    var owners = cluster.owners(key());
+    String source = owners.get(0), target = owners.get(1);
+    seed(target, UUID.randomUUID(), VectorClock.of(Map.of("node1", 1L)), false, new byte[0]);
+    cluster.nodes.get(target).fault = "oversized-range";
+    try (var peers = repairPeers(source);
+        var repair =
+            new AntiEntropy(
+                cluster.nodes.get(source).store,
+                cluster.ring(),
+                source,
+                peers,
+                root.resolve(source).resolve("transfers"))) {
+      assertEquals(
+          Status.Code.DATA_LOSS, status(assertThrows(Exception.class, () -> repair.round(target))));
+      assertEquals(0, cluster.nodes.get(source).store.verifyAll());
+    }
+  }
+
   private final class Cluster implements AutoCloseable {
     final List<String> ids = List.of("node1", "node2", "node3", "node4", "node5");
     final Map<String, Node> nodes = new LinkedHashMap<>();
@@ -987,6 +1262,19 @@ class QuorumIntegrationTest {
                     @SuppressWarnings("unchecked")
                     A changed = (A) builder.build();
                     super.sendMessage(changed);
+                  } else if (message instanceof RangeVersion version
+                      && fault.equals("oversized-range")) {
+                    var extra =
+                        com.google.protobuf.UnknownFieldSet.newBuilder()
+                            .addField(
+                                99,
+                                com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                                    .addLengthDelimited(ByteString.copyFrom(new byte[5000]))
+                                    .build())
+                            .build();
+                    @SuppressWarnings("unchecked")
+                    A invalid = (A) version.toBuilder().setUnknownFields(extra).build();
+                    super.sendMessage(invalid);
                   } else if (message instanceof ReplicaVersions versions
                       && fault.equals("bad-read")) {
                     @SuppressWarnings("unchecked")

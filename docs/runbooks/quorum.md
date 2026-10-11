@@ -84,7 +84,7 @@ Compose test creates ephemeral credentials and shuts its fixture down.
 
 Eight public and eight replica operations per node, 256 KiB chunks, 64 MiB objects,
 32 siblings and five fixed vector identities. Disk staging can use up to 1 GiB
-plus native upload staging and committed data. Recovery adds up to 192 MiB of
+plus native upload staging and committed data. Recovery adds up to 256 MiB of
 temporary transfers and a 256 MiB/128-version durable queue. Storage retains history; scans
 and startup auditing grow with it. No throughput or power-loss guarantee is made.
 
@@ -95,7 +95,7 @@ docker compose -f infra/compose/compose.yaml down
 Volumes survive shutdown. Acknowledged data survives tested owner process kills
 and volume-preserving restarts. Durable hints and read repair now propagate live
 versions and tombstones. See [deletion and recovery](recovery.md) for semantics,
-backlog handling and the coordinated storage-format upgrade. Anti-entropy is
-still pending.
+backlog handling and the coordinated storage-format upgrade. Periodic [anti-entropy](anti-entropy.md) now discovers divergence without
+hints or foreground reads.
 Back up before upgrade; do not resume writes from stale checkpoints or run two
 copies of a node identity. Upgrade all nodes together before enabling these RPCs.

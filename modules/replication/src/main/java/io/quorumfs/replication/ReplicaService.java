@@ -15,6 +15,7 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
   private final HashRing ring;
   private final String node;
   private final Path transfers;
+  private final MerkleService merkle;
   private final Semaphore slots = new Semaphore(8);
 
   public ReplicaService(ObjectStorage store, HashRing ring, String node, Path transfers) {
@@ -22,6 +23,7 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
     this.ring = ring;
     this.node = node;
     this.transfers = transfers;
+    merkle = new MerkleService(store, ring, node);
   }
 
   private void check(ClusterIdentity identity, ObjectKey key) {
@@ -87,11 +89,22 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
       try {
         VersionMetadata previous = metadata(key, version.getVersionId());
         if (!previous.equals(version)) throw Errors.exception(ErrorReason.CHECKSUM_MISMATCH);
-        store.read(
-            key.getNamespace(),
-            key.getKey().toByteArray(),
-            Wire.uuid(version.getVersionId()),
-            OutputStream.nullOutputStream());
+        try {
+          store.read(
+              key.getNamespace(),
+              key.getKey().toByteArray(),
+              Wire.uuid(version.getVersionId()),
+              OutputStream.nullOutputStream());
+        } catch (StorageException damaged) {
+          if (damaged.code() != StorageException.Code.CORRUPT) throw damaged;
+          try (var input = spool.input()) {
+            store.repair(
+                key.getNamespace(),
+                key.getKey().toByteArray(),
+                Wire.uuid(version.getVersionId()),
+                input);
+          }
+        }
         exists = true;
       } catch (StorageException e) {
         if (e.code() != StorageException.Code.NOT_FOUND) throw e;
@@ -150,6 +163,40 @@ public final class ReplicaService extends ReplicaStoreGrpc.ReplicaStoreImplBase 
         response.onNext(ingest(header, spool, Streams.end()));
         response.onCompleted();
       }
+    } catch (Exception e) {
+      response.onError(RpcFailure.map(e));
+    } finally {
+      slots.release();
+    }
+  }
+
+  @Override
+  public void exchangeMerkle(MerkleRequest request, StreamObserver<MerkleResponse> response) {
+    if (!slots.tryAcquire()) {
+      response.onError(Errors.exception(ErrorReason.CAPACITY_EXHAUSTED));
+      return;
+    }
+    try {
+      response.onNext(merkle.exchange(request));
+      response.onCompleted();
+    } catch (Exception e) {
+      response.onError(RpcFailure.map(e));
+    } finally {
+      slots.release();
+    }
+  }
+
+  @Override
+  public void fetchRangeVersions(RangeRequest request, StreamObserver<RangeVersion> response) {
+    if (!slots.tryAcquire()) {
+      response.onError(Errors.exception(ErrorReason.CAPACITY_EXHAUSTED));
+      return;
+    }
+    try {
+      long end = Streams.end();
+      for (var entry : merkle.page(request))
+        Streams.send((ServerCallStreamObserver<RangeVersion>) response, entry, end);
+      response.onCompleted();
     } catch (Exception e) {
       response.onError(RpcFailure.map(e));
     } finally {

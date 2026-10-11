@@ -51,15 +51,15 @@ free space beyond these logical limits.
 
 Read repair discovery has two preparation slots and no unbounded queue. It can
 be deferred before durable capture without failing a valid quorum read. Captured
-work survives restart and checkpoint restore. Anti-entropy is not yet implemented:
-if hints are lost and an object is never read, divergence may persist. Handoff
+work survives restart and checkpoint restore. Periodic [Merkle anti-entropy](anti-entropy.md) also discovers divergence
+without hints or foreground reads, within its documented snapshot budgets. Handoff
 also cannot reconstruct a payload when every durable copy is lost.
 
 ## Upgrade, checkpoint and rollback
 
 Stop all five nodes and take verified backups before upgrading. This binary
-synchronously upgrades storage marker 1 to 2 when opening a database. Previous
-binaries reject marker 2. Upgrade all nodes before resuming data service.
+synchronously upgrades storage markers 1/2 to 3 when opening a database. Previous
+binaries reject marker 3. Upgrade all nodes before resuming data service.
 Checkpoints include pending hint payloads/destinations as well as live versions,
 tombstones and causal counters. Restore only using the existing fresh-target
 procedure in [storage and backups](storage.md), retaining matching identity and

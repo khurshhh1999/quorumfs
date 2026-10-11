@@ -73,9 +73,10 @@ descriptor binaries, DB files or other execution artifacts belong in Git.
 
 ## Recovery format upgrade
 
-The deletion/recovery binary accepts prior format 1 databases and synchronously
-upgrades the marker to 2. It retains legacy/live manifests and adds causal
-tombstones and bounded pinned hint payloads. Old binaries reject format 2.
+The anti-entropy binary accepts prior format 1/2 databases and synchronously
+upgrades the marker to 3. It retains legacy/live manifests and adds causal
+tombstones and bounded pinned hint payloads. Old binaries reject format 3. Atomic payload repair adds reserved replacement
+chunk identities; checkpoints preserve and audit these alongside causal history.
 Checkpoints include this recovery state; startup/restore verifies published hint
 checksums and removes only unpublished hint chunks. Stop all nodes and back up
 before upgrading; mixed-version service and in-place downgrade are unsupported.

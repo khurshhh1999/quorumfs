@@ -202,7 +202,7 @@ class RecoveryStorageTest {
         path,
         (db, handles) ->
             assertArrayEquals(
-                new byte[] {2},
+                new byte[] {3},
                 db.get("storage-format".getBytes(java.nio.charset.StandardCharsets.UTF_8))));
   }
 
