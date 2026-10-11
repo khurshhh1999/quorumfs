@@ -19,6 +19,7 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
   private final HashRing ring;
   private final PeerClient peers;
   private final Recovery recovery;
+  private final AntiEntropy antiEntropy;
   private final ClusterInfo info;
   private final Path transfers;
   private final Set<String> namespaces;
@@ -38,7 +39,13 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
     this.info = info;
     this.transfers = transfers;
     this.namespaces = Set.copyOf(namespaces);
+    long interval =
+        Long.parseLong(System.getProperty("quorumfs.antiEntropy.intervalMillis", "15000"));
+    if (interval < 1000 || interval > 300000)
+      throw new IllegalArgumentException("Invalid anti-entropy interval");
     recovery = new Recovery(store, peers, ring, transfers);
+    antiEntropy = new AntiEntropy(store, ring, info.getNodeId(), peers, transfers);
+    antiEntropy.start(java.time.Duration.ofMillis(interval));
   }
 
   private void authorize(ObjectKey key) {
@@ -336,6 +343,7 @@ public final class CoordinatorService extends ObjectStoreGrpc.ObjectStoreImplBas
 
   @Override
   public void close() {
+    antiEntropy.close();
     recovery.close();
     workers.shutdownNow();
     workers.close();

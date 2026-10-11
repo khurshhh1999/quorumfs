@@ -2,8 +2,8 @@
 
 `quorumfs.v1` defines public ObjectStore and internal ReplicaStore contracts.
 Authenticated development mode implements public put/get/head/resolve/delete and
-internal replicate/read/fetch/apply-tombstone/deliver-hint operations. Merkle and
-range exchange remain UNIMPLEMENTED. Without configured access credentials,
+internal replicate/read/fetch/apply-tombstone/deliver-hint operations, plus
+snapshot Merkle and paginated range exchange. Without configured access credentials,
 only GetClusterInfo and health inspection are enabled.
 
 `v1/` contains the review baseline as `.proto` source files. Gradle compiles both the baseline and current schemas into ignored build directories for comparison. No generated descriptors are committed. The unit compatibility test
@@ -54,3 +54,12 @@ Both require peer authentication and exact full-ring identity. No hint counts as
 Durable delivery may complete a write after its caller times out. Hint capacity
 exhaustion occurs before dispatch and returns RESOURCE_EXHAUSTED. Request IDs do
 not provide global deduplication; a new public retry can create a new causal event.
+
+MerkleRequest adds `peer_node_id` (5); MerkleResponse adds `node_id` (4).
+RangeRequest adds `peer_node_id` (6), and RangeVersion adds `corrupt` (4).
+Existing field numbers/signatures remain unchanged. Merkle exchange requires
+the full-space canonical range and depth 0–4; range exchange accepts only the
+16 canonical leaves and limits 1–128. Snapshots are peer-bound, last 60 seconds
+and become invalid after restart/replacement. The client verifies page metadata
+against the advertised leaf hash before repair. A captured snapshot is not a
+convergence barrier for later writes. See ADR 0007 for bounds and encodings.

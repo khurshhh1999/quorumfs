@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.OutputStream;
 import java.nio.file.*;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Tag;
@@ -169,6 +170,56 @@ class StorageProcessTest {
       assertEquals(0, process.exitValue(), () -> read(log));
       assertTrue(read(log).contains("PASS HINT_BOUNDED"), () -> read(log));
       System.out.println(read(log));
+    } finally {
+      if (process.isAlive()) {
+        process.destroyForcibly();
+        process.waitFor(10, TimeUnit.SECONDS);
+      }
+    }
+  }
+
+  @Test
+  void repairPointerIsAtomicAcrossRealProcessKills() throws Exception {
+    for (String mode :
+        List.of("CHUNK_WRITE", "WAL_SYNC", "MANIFEST_WRITE", "AFTER_MANIFEST", "ACKNOWLEDGED")) {
+      Path database = root.resolve(mode),
+          signal = root.resolve(mode + ".ready"),
+          log = root.resolve(mode + ".log");
+      Process process = start(database, "repair-" + mode, signal, log);
+      try {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (!Files.exists(signal) && process.isAlive() && System.nanoTime() < end)
+          Thread.sleep(20);
+        assertTrue(Files.exists(signal), () -> read(log));
+        process.destroyForcibly();
+        assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+        UUID id =
+            UUID.fromString(
+                Files.readString(signal.resolveSibling(signal.getFileName() + ".version")));
+        try (var store = new ObjectStorage(database, "process-fixture")) {
+          assertEquals(1, store.verifyAll());
+          store.read("test", new byte[] {1}, id, OutputStream.nullOutputStream());
+          assertEquals(
+              mode.equals("AFTER_MANIFEST") || mode.equals("ACKNOWLEDGED"),
+              !id.equals(store.head("test", new byte[] {1}, id).payloadId()));
+        }
+      } finally {
+        if (process.isAlive()) {
+          process.destroyForcibly();
+          process.waitFor(10, TimeUnit.SECONDS);
+        }
+      }
+    }
+  }
+
+  @Test
+  void maximumRepairUsesLessHeapThanTheObject() throws Exception {
+    Path log = root.resolve("repair-bounded.log");
+    Process process =
+        start(root.resolve("repair-bounded"), "repair-bounded", root.resolve("unused"), log);
+    try {
+      assertTrue(process.waitFor(90, TimeUnit.SECONDS));
+      assertEquals(0, process.exitValue(), () -> read(log));
     } finally {
       if (process.isAlive()) {
         process.destroyForcibly();

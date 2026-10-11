@@ -4,7 +4,7 @@ QuorumFS is a developer-preview distributed object store with five fixed nodes,
 consistent hashing, durable RocksDB storage and configurable strict read/write
 quorums. It supports authenticated local-development uploads, verified downloads,
 causal sibling inspection, explicit conflict resolution, causal deletion, durable
-hinted handoff and bounded read repair.
+hinted handoff, bounded read repair and periodic Merkle anti-entropy.
 
 ## Run locally
 
@@ -66,8 +66,10 @@ exactly-once requests. See the [quorum runbook](docs/runbooks/quorum.md).
 
 Stopping preserves volumes. Health/readiness describe local service startup;
 quorum availability is checked per operation. Pending durable hints catch up a
-returning owner, and quorum reads trigger bounded repair. Anti-entropy is not
-implemented yet; unread divergence without surviving hints can remain.
+returning owner, quorum reads trigger bounded repair, and periodic Merkle exchange
+can heal divergence without hints or foreground reads. See the
+[anti-entropy runbook](docs/runbooks/anti-entropy.md) for snapshot limits, interval
+settings and corruption recovery.
 
 ## Delete and recreate
 
@@ -102,14 +104,14 @@ Exactly five unique fixed members are required. Quorums must satisfy
 `1 <= R,W <= N <= 5` and `R + W > N`. Reusing a volume with changed cluster ID,
 epoch, node ID, membership or quorum fails startup. Never erase identity to
 bypass this check. All nodes must use the same configuration and compatible
-binary before enabling data RPCs. This binary upgrades the database format to 2; older binaries cannot reopen it.
+binary before enabling data RPCs. This binary upgrades the database format to 3; older binaries cannot reopen it.
 Upgrade all nodes together. Back up before upgrading; do not originate
 writes from stale checkpoints or run two copies of one node identity.
 
 Objects are at most 64 MiB, streamed in 256 KiB chunks. Each node admits eight
 public and eight replica operations, with at most 32 visible siblings per key.
 Temporary disk staging can use up to 1 GiB plus native upload staging and retained
-object history. Recovery adds at most 192 MiB of temporary transfers and a
+object history. Recovery adds at most 256 MiB of temporary transfers and a
 256 MiB/128-version durable hint budget per node. A full hint queue rejects new
 writes before dispatch. The client defaults to a 10-second deadline, server uploads to a
 15-second maximum, and individual peer RPCs to 3 seconds. Slow transfers can time

@@ -20,8 +20,8 @@ message ReplicaVersions { ClusterIdentity cluster = 1; string node_id = 2; repea
 message FetchVersionRequest { ClusterIdentity cluster = 1; ObjectKey object = 2; string version_id = 3; }
 message TombstoneRequest { ReplicaHeader header = 1; }
 message TokenRange { bytes start_exclusive = 1; bytes end_inclusive = 2; }
-message MerkleRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; uint32 depth = 4; }
+message MerkleRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; uint32 depth = 4; string peer_node_id = 5; }
 message MerkleNode { TokenRange range = 1; bytes sha256 = 2; }
-message MerkleResponse { ClusterIdentity cluster = 1; string snapshot_id = 2; repeated MerkleNode nodes = 3; }
-message RangeRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; bytes resume_token = 4; uint32 limit = 5; }
-message RangeVersion { ObjectKey object = 1; VersionMetadata version = 2; bytes resume_token = 3; }
+message MerkleResponse { ClusterIdentity cluster = 1; string snapshot_id = 2; repeated MerkleNode nodes = 3; string node_id = 4; }
+message RangeRequest { ClusterIdentity cluster = 1; TokenRange range = 2; string snapshot_id = 3; bytes resume_token = 4; uint32 limit = 5; string peer_node_id = 6; }
+message RangeVersion { ObjectKey object = 1; VersionMetadata version = 2; bytes resume_token = 3; bool corrupt = 4; }

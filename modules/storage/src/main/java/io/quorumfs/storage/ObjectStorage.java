@@ -41,6 +41,7 @@ public final class ObjectStorage implements AutoCloseable {
   private static final byte[] COUNTER = new byte[] {1};
   private static final byte[] FORMAT_V1 = new byte[] {1};
   private static final byte[] FORMAT_V2 = new byte[] {2};
+  private static final byte[] FORMAT_V3 = new byte[] {3};
   private static final byte[] RING = {1}, NODE = {2};
   private HashRing ring;
   private String node;
@@ -82,9 +83,14 @@ public final class ObjectStorage implements AutoCloseable {
     }
   }
 
-  public record Version(UUID id, long sequence, long size, byte[] sha256, boolean tombstone) {
+  public record Version(
+      UUID id, long sequence, long size, byte[] sha256, boolean tombstone, UUID payloadId) {
     public Version(UUID id, long sequence, long size, byte[] sha256) {
-      this(id, sequence, size, sha256, false);
+      this(id, sequence, size, sha256, false, id);
+    }
+
+    public Version(UUID id, long sequence, long size, byte[] sha256, boolean tombstone) {
+      this(id, sequence, size, sha256, tombstone, id);
     }
 
     public Version {
@@ -170,12 +176,15 @@ public final class ObjectStorage implements AutoCloseable {
             "Persisted node/cluster identity or membership differs; refusing startup");
       }
       byte[] format = db.get(FORMAT);
-      if (format != null && !Arrays.equals(format, FORMAT_V1) && !Arrays.equals(format, FORMAT_V2))
+      if (format != null
+          && !Arrays.equals(format, FORMAT_V1)
+          && !Arrays.equals(format, FORMAT_V2)
+          && !Arrays.equals(format, FORMAT_V3))
         throw new StorageException(CORRUPT, "Unsupported storage format");
       try (WriteBatch batch = new WriteBatch();
           WriteOptions write = sync()) {
         batch.put(IDENTITY, expected);
-        batch.put(FORMAT, FORMAT_V2);
+        batch.put(FORMAT, FORMAT_V3);
         db.write(write, batch);
       }
       byte[] persistedRing = db.get(cf("ring"), RING);
@@ -296,7 +305,9 @@ public final class ObjectStorage implements AutoCloseable {
     if (uploads.size() >= limits.maxUploads())
       throw new StorageException(CAPACITY, "Upload capacity exhausted");
     try {
-      if (uploads.containsKey(id) || db.get(cf("requests"), StorageKeys.id(id)) != null)
+      if (uploads.containsKey(id)
+          || db.get(cf("requests"), StorageKeys.id(id)) != null
+          || db.get(cf("requests"), payloadKey(id)) != null)
         throw new StorageException(INVALID, "Version ID is already in use");
       long sequence = allocate(context == null ? 0 : context.get(node));
       Upload upload =
@@ -700,7 +711,8 @@ public final class ObjectStorage implements AutoCloseable {
 
   private static Version decode(UUID id, byte[] bytes) throws StorageException {
     if (bytes == null) throw new StorageException(NOT_FOUND, "Version not found");
-    if (bytes.length != 53 || (bytes[0] != 1 && bytes[0] != 2 && bytes[0] != 3))
+    if (!((bytes.length == 53 && bytes[0] >= 1 && bytes[0] <= 3)
+        || (bytes.length == 69 && bytes[0] == 4)))
       throw new StorageException(CORRUPT, "Invalid manifest encoding");
     ByteBuffer b = ByteBuffer.wrap(bytes);
     b.get();
@@ -712,7 +724,8 @@ public final class ObjectStorage implements AutoCloseable {
       throw new StorageException(CORRUPT, "Invalid manifest fields");
     if (bytes[0] == 3 && (size != 0 || !MessageDigest.isEqual(hash, sha256(new byte[0]))))
       throw new StorageException(CORRUPT, "Invalid tombstone");
-    return new Version(id, sequence, size, hash, bytes[0] == 3);
+    UUID payload = bytes[0] == 4 ? new UUID(b.getLong(), b.getLong()) : id;
+    return new Version(id, sequence, size, hash, bytes[0] == 3, payload);
   }
 
   public synchronized Version head(String namespace, byte[] key, UUID version) throws IOException {
@@ -746,12 +759,19 @@ public final class ObjectStorage implements AutoCloseable {
   }
 
   private void scan(Version version, OutputStream output) throws IOException, RocksDBException {
+    try (ReadOptions options = new ReadOptions()) {
+      scan(version, output, options);
+    }
+  }
+
+  private void scan(Version version, OutputStream output, ReadOptions options)
+      throws IOException, RocksDBException {
     MessageDigest hash = digest();
     for (long offset = 0; offset < version.size(); offset += CHUNK_BYTES) {
       open();
       if (Thread.currentThread().isInterrupted())
         throw new StorageException(CANCELLED, "Read cancelled");
-      byte[] chunk = db.get(cf("chunks"), StorageKeys.chunk(version.id(), offset));
+      byte[] chunk = db.get(cf("chunks"), options, StorageKeys.chunk(version.payloadId(), offset));
       int expected = (int) Math.min(CHUNK_BYTES, version.size() - offset);
       if (chunk == null || chunk.length != 32 + expected)
         throw new StorageException(CORRUPT, "Missing or truncated chunk");
@@ -770,6 +790,7 @@ public final class ObjectStorage implements AutoCloseable {
     // Never collect committed chunks, even if a future/corrupt staging record refers to them.
     byte[] stage = db.get(cf("staging"), StorageKeys.id(id));
     if (db.get(cf("requests"), StorageKeys.id(id)) != null
+        || db.get(cf("requests"), payloadKey(id)) != null
         || (stage != null && db.get(cf("manifests"), stage) != null))
       throw new StorageException(CORRUPT, "Staging overlaps a committed version");
     faults.at(Point.CLEANUP);
@@ -815,6 +836,10 @@ public final class ObjectStorage implements AutoCloseable {
                 CORRUPT, "Manifest has missing or inconsistent committed index");
           }
           Version version = decode(id, iterator.value());
+          if (!version.payloadId().equals(id)
+              && !Arrays.equals(
+                  db.get(cf("requests"), payloadKey(version.payloadId())), StorageKeys.id(id)))
+            throw new StorageException(CORRUPT, "Missing payload identity reservation");
           maximumSequence = Math.max(maximumSequence, version.sequence());
           byte[] rawVector = db.get(cf("vectors"), StorageKeys.id(id));
           if ((iterator.value()[0] >= 2) != (rawVector != null))
@@ -838,6 +863,12 @@ public final class ObjectStorage implements AutoCloseable {
       long indexed = 0;
       try (RocksIterator iterator = db.newIterator(cf("requests"))) {
         for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+          if (iterator.key().length == 17 && iterator.key()[0] == 2) {
+            StorageKeys.id(iterator.value());
+            if (db.get(cf("requests"), iterator.value()) == null)
+              throw new StorageException(CORRUPT, "Orphan payload reservation");
+            continue;
+          }
           UUID id = StorageKeys.id(iterator.key());
           byte[] key = iterator.value();
           if (!id.equals(StorageKeys.manifestId(key)) || db.get(cf("manifests"), key) == null) {
@@ -950,6 +981,141 @@ public final class ObjectStorage implements AutoCloseable {
           for (Path file : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(file);
         }
       }
+    }
+  }
+
+  private static byte[] payloadKey(UUID id) {
+    byte[] key = StorageKeys.id(id);
+    key[0] = 2;
+    return key;
+  }
+
+  public record InventoryEntry(
+      String namespace, byte[] key, Version version, VectorClock vector, boolean healthy) {
+    public InventoryEntry {
+      key = key.clone();
+    }
+
+    @Override
+    public byte[] key() {
+      return key.clone();
+    }
+  }
+
+  /** A detached, bounded view from one RocksDB snapshot, including verified payload health. */
+  public synchronized List<InventoryEntry> inventory(String peer) throws IOException {
+    open();
+    if (ring == null || !ring.nodeIds().contains(peer) || peer.equals(node))
+      throw new StorageException(INVALID, "Invalid comparison peer");
+    List<InventoryEntry> entries = new ArrayList<>();
+    long bytes = 0, metadataBytes = 0;
+    int visited = 0;
+    Snapshot snapshot = db.getSnapshot();
+    try (ReadOptions options = new ReadOptions().setSnapshot(snapshot);
+        RocksIterator iterator = db.newIterator(cf("heads"), options)) {
+      for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+        if (Thread.currentThread().isInterrupted())
+          throw new StorageException(CANCELLED, "Snapshot cancelled");
+        if (++visited > 65536)
+          throw new StorageException(CAPACITY, "Snapshot scan budget exceeded");
+        byte[] encoded = iterator.key();
+        UUID id = StorageKeys.manifestId(encoded);
+        ByteBuffer key = ByteBuffer.wrap(encoded);
+        key.get();
+        byte[] ns = new byte[key.getInt()];
+        key.get(ns);
+        byte[] object = new byte[key.getInt()];
+        key.get(object);
+        String namespace = new String(ns, StandardCharsets.UTF_8);
+        var owners = ring.owners(namespace, object);
+        if (!owners.contains(node) || !owners.contains(peer)) continue;
+        Version version = decode(id, db.get(cf("manifests"), options, encoded));
+        if (entries.size() == 8192 || version.size() > 512L * 1024 * 1024 - bytes)
+          throw new StorageException(CAPACITY, "Snapshot inventory budget exceeded");
+        bytes += version.size();
+        metadataBytes += encoded.length + iterator.value().length + 128;
+        if (metadataBytes > 4L * 1024 * 1024)
+          throw new StorageException(CAPACITY, "Snapshot metadata budget exceeded");
+        boolean healthy = true;
+        try {
+          scan(version, OutputStream.nullOutputStream(), options);
+        } catch (StorageException e) {
+          if (e.code() != CORRUPT) throw e;
+          healthy = false;
+        }
+        entries.add(
+            new InventoryEntry(
+                namespace, object, version, checkedVector(iterator.value()), healthy));
+      }
+      iterator.status();
+      return List.copyOf(entries);
+    } catch (RocksDBException e) {
+      throw failure(e);
+    } finally {
+      db.releaseSnapshot(snapshot);
+    }
+  }
+
+  /** Repair bytes under a new chunk identity, then atomically swap only the manifest pointer. */
+  public synchronized void repair(String namespace, byte[] key, UUID id, InputStream input)
+      throws IOException {
+    Version previous = head(namespace, key, id);
+    vector(id); // Repair publication format is causal-only.
+    if (previous.tombstone())
+      throw new StorageException(INVALID, "Tombstone has no repairable payload");
+    UUID staged = UUID.randomUUID();
+    byte[] stageKey = StorageKeys.id(staged);
+    try {
+      try (WriteOptions write = sync()) {
+        db.put(cf("staging"), write, stageKey, StorageKeys.manifest("_repair", stageKey, staged));
+      }
+      MessageDigest checksum = digest();
+      try (WriteOptions write = new WriteOptions().setDisableWAL(false)) {
+        for (long offset = 0; offset < previous.size(); offset += CHUNK_BYTES) {
+          if (Thread.currentThread().isInterrupted())
+            throw new StorageException(CANCELLED, "Repair cancelled");
+          byte[] bytes = input.readNBytes((int) Math.min(CHUNK_BYTES, previous.size() - offset));
+          if (bytes.length != Math.min(CHUNK_BYTES, previous.size() - offset))
+            throw new StorageException(INVALID, "Truncated repair");
+          checksum.update(bytes);
+          faults.at(Point.CHUNK_WRITE);
+          db.put(
+              cf("chunks"),
+              write,
+              StorageKeys.chunk(staged, offset),
+              ByteBuffer.allocate(32 + bytes.length).put(sha256(bytes)).put(bytes).array());
+        }
+      }
+      if (input.read() != -1 || !MessageDigest.isEqual(checksum.digest(), previous.sha256()))
+        throw new StorageException(CORRUPT, "Invalid replacement checksum");
+      faults.at(Point.WAL_SYNC);
+      db.syncWal();
+      byte[] manifest =
+          ByteBuffer.allocate(69)
+              .put(encode(previous))
+              .putLong(staged.getMostSignificantBits())
+              .putLong(staged.getLeastSignificantBits())
+              .array();
+      manifest[0] = 4;
+      faults.at(Point.MANIFEST_WRITE);
+      try (WriteBatch batch = new WriteBatch();
+          WriteOptions write = sync()) {
+        batch.put(cf("manifests"), StorageKeys.manifest(namespace, key, id), manifest);
+        batch.put(cf("requests"), payloadKey(staged), StorageKeys.id(id));
+        batch.delete(cf("staging"), stageKey);
+        db.write(write, batch);
+      }
+      faults.at(Point.AFTER_MANIFEST);
+    } catch (RocksDBException e) {
+      throw failure(e);
+    } catch (IOException e) {
+      try {
+        if (db.get(cf("staging"), stageKey) != null) cleanup(staged);
+      } catch (RocksDBException cleanupError) {
+        e.addSuppressed(cleanupError);
+        throw failure(e);
+      }
+      throw e;
     }
   }
 
